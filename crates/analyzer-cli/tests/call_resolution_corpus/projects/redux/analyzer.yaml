@@ -1,0 +1,4 @@
+cache: {enabled: false}
+paths:
+  include: ["src/**"]
+  exclude: ["src/tests/**"]

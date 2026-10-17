@@ -1,0 +1,170 @@
+name: build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Read and validate release version
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, re, tomllib
+          version = tomllib.loads(pathlib.Path('crates/analyzer-cli/Cargo.toml').read_text())['package']['version']
+          assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version), version
+          if os.environ['REF_TYPE'] == 'tag':
+              assert os.environ['REF_NAME'] == f'v{version}', 'Tag must match the CLI version'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'version={version}\n')
+          PY
+      - run: cargo fmt --all -- --check
+      - run: cargo test --workspace --locked
+      - run: node --test crates/analyzer-cli/tests/*.cjs
+      - run: for file in crates/analyzer-cli/web/*.js; do node --check "$file"; done
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            platform: linux-x64
+            extension: ''
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            platform: linux-arm64
+            extension: ''
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: darwin-x64
+            extension: ''
+          - os: macos-14
+            target: aarch64-apple-darwin
+            platform: darwin-arm64
+            extension: ''
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            platform: win32-x64
+            extension: .exe
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            platform: win32-arm64
+            extension: .exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build standalone engine
+        run: cargo build --release --locked --target '${{ matrix.target }}' -p analyzer-cli --bin codefactor
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+      - name: Smoke test on the native platform
+        env:
+          ENGINE: target/${{ matrix.target }}/release/codefactor${{ matrix.extension }}
+          ENGINE_VERSION: ${{ needs.test.outputs.version }}
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, subprocess
+          engine = str(pathlib.Path(os.environ['ENGINE']).resolve())
+          assert subprocess.check_output([engine, '--version'], text=True).strip() == f"codefactor {os.environ['ENGINE_VERSION']}"
+          result = subprocess.run([engine, 'scan', 'crates/analyzer-cli/tests/fixtures/cost', '--no-architecture', '--format', 'json', '--out', 'smoke-report.json'])
+          assert result.returncode in (0, 2), result.returncode
+          report = json.loads(pathlib.Path('smoke-report.json').read_text())
+          assert report['summary']['files'] == 5 and not report['parse_errors'], report
+          PY
+      - name: Package binary and checksum manifest
+        run: python .github/scripts/package-release.py --binary 'target/${{ matrix.target }}/release/codefactor${{ matrix.extension }}' --target '${{ matrix.target }}' --version '${{ needs.test.outputs.version }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codefactor-${{ matrix.platform }}
+          path: target/release-packages/*
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag' && github.repository == 'codefactor-app/core'
+    needs: [test, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: codefactor-*
+          merge-multiple: true
+          path: release
+      - name: Verify the complete release
+        env:
+          ENGINE_VERSION: ${{ needs.test.outputs.version }}
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, pathlib
+          root = pathlib.Path('release')
+          platforms = ('linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64', 'win32-x64', 'win32-arm64')
+          assert len(list(root.iterdir())) == len(platforms) * 2, 'Incomplete release'
+          checksums = []
+          for platform in platforms:
+              manifest_path = root / f'manifest-{platform}.json'
+              manifest = json.loads(manifest_path.read_text())
+              filename = f'codefactor-{platform}' + ('.exe' if platform.startswith('win32') else '')
+              data = (root / filename).read_bytes()
+              digest = hashlib.sha256(data).hexdigest()
+              assert manifest['version'] == os.environ['ENGINE_VERSION']
+              assert manifest['platform'] == platform and manifest['file'] == filename
+              assert manifest['sha256'] == digest and manifest['size'] == len(data)
+              checksums.extend((f'{digest}  {filename}', f'{hashlib.sha256(manifest_path.read_bytes()).hexdigest()}  {manifest_path.name}'))
+          (root / 'SHA256SUMS').write_text('\n'.join(sorted(checksums)) + '\n')
+          PY
+      - name: Publish all assets together
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release already exists; published versions cannot be replaced." >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" release/* --verify-tag --draft --title "Codefactor $RELEASE_TAG" --notes "Standalone Codefactor engine for Linux, macOS and Windows (x64 and ARM64). Linux binaries use musl; Windows binaries include the C runtime. Language connectors verify manifest SHA-256 checksums."
+          gh release edit "$RELEASE_TAG" --draft=false --latest

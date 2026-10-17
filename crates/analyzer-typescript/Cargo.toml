@@ -1,0 +1,10 @@
+[package]
+name = "analyzer-typescript"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+analyzer-core = { path = "../analyzer-core" }
+analyzer-parser = { path = "../analyzer-parser" }
+tree-sitter-typescript = "0.23"
+

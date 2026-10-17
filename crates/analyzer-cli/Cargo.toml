@@ -1,0 +1,31 @@
+[package]
+name = "analyzer-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "codefactor"
+path = "src/main.rs"
+
+[dependencies]
+log = { version = "0.4", features = ["std"] }
+analyzer-core = { path = "../analyzer-core" }
+analyzer-python = { path = "../analyzer-python" }
+analyzer-javascript = { path = "../analyzer-javascript" }
+analyzer-typescript = { path = "../analyzer-typescript" }
+analyzer-php = { path = "../analyzer-php" }
+analyzer-rust = { path = "../analyzer-rust" }
+anyhow = "1"
+axum = "0.7"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+
+[target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
+# Override malloc/free too: Tree-sitter's C allocations share the parsing workers.
+mimalloc = { version = "0.1.52", default-features = false, features = ["override"] }
+
+[build-dependencies]

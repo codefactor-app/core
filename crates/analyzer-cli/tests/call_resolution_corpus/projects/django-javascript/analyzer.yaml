@@ -1,0 +1,4 @@
+languages: {enabled: [javascript]}
+cache: {enabled: false}
+architecture: {enabled: false}
+algorithmic_complexity: {enabled: false}

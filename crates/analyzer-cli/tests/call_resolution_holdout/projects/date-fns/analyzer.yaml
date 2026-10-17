@@ -1,0 +1,4 @@
+config_version: 1
+languages: {enabled: [typescript]}
+paths: {include: ["src/**"]}
+cache: {enabled: false}

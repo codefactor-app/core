@@ -1,0 +1,19 @@
+[package]
+name = "analyzer-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+log = { version = "0.4", features = ["std"] }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+serde_yaml = "0.9"
+globset = "0.4"
+ignore = "0.4"
+sha2 = "0.10"
+rayon = "1"
+thiserror = "2"
+regex = "1"
+yaml-rust2 = "0.10"
+toml = "0.8"

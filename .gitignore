@@ -1,0 +1,33 @@
+/target/
+/example/
+/.cargo-cache/
+/.venv/
+/.codefactor-infra/
+/browser-artifacts/
+/coverage*.json
+/holdout-results.json
+/smoke-report.json
+/codefactor-*.tar.gz
+/codefactor-*.zip
+.analyzer-cache/
+analyzer.yaml.local
+*.profraw
+*.gcda
+*.gcno
+__pycache__/
+*.pyc
+
+# Local credentials and environment
+.env
+.env.*
+!.env.example
+/auth.json
+/.npmrc
+/.pypirc
+
+# Local agent state
+/.planning/
+/.claude/
+/.codex/
+
+.DS_Store

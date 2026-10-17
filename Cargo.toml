@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+exclude = ["vendor/tree-sitter-typescript", "vendor/tree-sitter-php"]
+members = [
+  "crates/analyzer-core",
+  "crates/analyzer-parser",
+  "crates/analyzer-python",
+  "crates/analyzer-javascript",
+  "crates/analyzer-typescript",
+  "crates/analyzer-php",
+  "crates/analyzer-rust",
+  "crates/analyzer-cli",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[patch.crates-io]
+tree-sitter-typescript = { path = "vendor/tree-sitter-typescript" }
+tree-sitter-php = { path = "vendor/tree-sitter-php" }

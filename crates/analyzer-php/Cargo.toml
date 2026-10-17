@@ -1,0 +1,10 @@
+[package]
+name = "analyzer-php"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+analyzer-core = { path = "../analyzer-core" }
+analyzer-parser = { path = "../analyzer-parser" }
+tree-sitter-php = "0.24"
+

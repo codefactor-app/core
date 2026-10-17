@@ -1,0 +1,9 @@
+cache: {enabled: false}
+paths:
+  include: ["src/**"]
+  exclude: ["src/tests/**"]
+resolution:
+  rust:
+    target: x86_64-unknown-linux-gnu
+    features: []
+    cfg: []

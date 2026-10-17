@@ -1,0 +1,1555 @@
+{
+  "schema_version": 1,
+  "threshold_percent": 90,
+  "selection_frozen_before_first_run": true,
+  "measurement_status": "not_measured",
+  "base_program_revision": "86d98247d3643bcf7133bac2e16982dbf3e01145",
+  "projects": [
+    {
+      "id": "date-fns",
+      "repository": "https://github.com/date-fns/date-fns",
+      "revision": "313b902b9a72c64501074db9bc2b9897d2db5140",
+      "version": "4.1.0",
+      "language": "typescript",
+      "license": "MIT",
+      "selection": {
+        "entry_modules": [
+          "add",
+          "sub",
+          "differenceInBusinessDays",
+          "differenceInDays",
+          "startOfWeek",
+          "endOfWeek",
+          "eachWeekOfInterval"
+        ],
+        "scope": "All direct identifier calls bound by named relative imports or local function declarations in the selected entry modules and their complete relative source-import closure. All copied production functions are included; Date/Math/native methods, dynamic callees and constructors are outside this static family. One callable-parameter control in constructFrom is scored separately."
+      },
+      "files": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "8d3951c38967b964b1fe259bfd200c2647cc04c858b55a4414e3122a60f1ef4b"
+        },
+        {
+          "path": "package.json",
+          "sha256": "4569c5b08a8bc61281236014c2a43490142579e1f47550cf51297607feba4b9b"
+        },
+        {
+          "path": "src/_lib/defaultOptions/index.ts",
+          "sha256": "de27241332dd5a12c281ba10f58bb7fb68402bfa13bba9882005b5bea677f61e"
+        },
+        {
+          "path": "src/_lib/getTimezoneOffsetInMilliseconds/index.ts",
+          "sha256": "5b1d01e32d7e2e1f1d51cb089b7e408dbd1ebe9c1e953089092450b6fec19811"
+        },
+        {
+          "path": "src/_lib/normalizeDates/index.ts",
+          "sha256": "f167025434bff14b3c1df9f0c73cdc66090e2ef93bfbf3b63193678d9db6c1e0"
+        },
+        {
+          "path": "src/_lib/normalizeInterval/index.ts",
+          "sha256": "efd94f20213e85bfbef4217ba03474c5839b81a3b177a6b9215a3353854e8a96"
+        },
+        {
+          "path": "src/add/index.ts",
+          "sha256": "31b5b1c4b3a1f7404206289ae2f9f2770c3cb4da663ef4ec472f67eebd5e28e6"
+        },
+        {
+          "path": "src/addDays/index.ts",
+          "sha256": "7c6124b445261ef300f76102aee29c243903c300f6c5e83cdf5184d742d5cbc8"
+        },
+        {
+          "path": "src/addMonths/index.ts",
+          "sha256": "7cfcdc6643eb41bee8eac24c5b1babf6ecac73e04e83f8c7cdbb65d60194a44e"
+        },
+        {
+          "path": "src/addWeeks/index.ts",
+          "sha256": "be9f287ae6a5ecbbef8ac8d3df1e135c15ee331b5876c9e0e10cf672485b6edd"
+        },
+        {
+          "path": "src/constants/index.ts",
+          "sha256": "aea1c60f9bdb446d9acc2099e4eecba797238925873cb654dae7f37dd7e19f47"
+        },
+        {
+          "path": "src/constructFrom/index.ts",
+          "sha256": "09473b99a0b54be9f14f28ab9a37d15c3d2bf94069fafc900eb760db4478b403"
+        },
+        {
+          "path": "src/differenceInBusinessDays/index.ts",
+          "sha256": "c30dee874a013bb2f27c90634494c0f4fc26944166e20b74883d772017e489a4"
+        },
+        {
+          "path": "src/differenceInCalendarDays/index.ts",
+          "sha256": "dd348623e79a2d853d97a1e3a0e76d50f8132a9708a1fd92fbf01efdbbd6b8c1"
+        },
+        {
+          "path": "src/differenceInDays/index.ts",
+          "sha256": "964543fa59ad2cbb36dd6e3658ac6cfbf3f7cbd8bc351d0527d4a54db29f2c15"
+        },
+        {
+          "path": "src/eachWeekOfInterval/index.ts",
+          "sha256": "93cb08b32bff08518b590da15bcd64a957eb6b8db985844ffc85b87984ec9ea4"
+        },
+        {
+          "path": "src/endOfWeek/index.ts",
+          "sha256": "3713e97d3283be8ec7614e06530cd581d53637ec07fb3ea811b5e939ef0c9865"
+        },
+        {
+          "path": "src/fp/types.ts",
+          "sha256": "e0157b4526518fd04b464a3f1dd84fa29a2f2c05fe9733266d73ac9bb16c288c"
+        },
+        {
+          "path": "src/isDate/index.ts",
+          "sha256": "92aff976a01df842096150dab13c6a774b6de774acf7110852f29ad70e82962a"
+        },
+        {
+          "path": "src/isSameDay/index.ts",
+          "sha256": "d7c3642a3934973e6a1fa92cdec7a22f5344fa23c095d0b76ee1cc665d1a1bc6"
+        },
+        {
+          "path": "src/isValid/index.ts",
+          "sha256": "3664a0163e13e71a14d631684ca79b2698c1cc3857016116462e96a8ec99c741"
+        },
+        {
+          "path": "src/isWeekend/index.ts",
+          "sha256": "0621323745f3a1e0cf2352741c61bd003d9a9d3f3a42e4aeab969be7fc2d013c"
+        },
+        {
+          "path": "src/locale/types.ts",
+          "sha256": "13516f389b668919ae5cf08cf1154b916bd2a548002d2112e3b8b42948b7e9ed"
+        },
+        {
+          "path": "src/startOfDay/index.ts",
+          "sha256": "57a1a6efbd47ef63484909c9e685c11477d311d374edc2de264b8743b0449408"
+        },
+        {
+          "path": "src/startOfWeek/index.ts",
+          "sha256": "530d07ad7470aaae2dce95f5c254b56314ade46d4dd179e9c877b28a9206ab08"
+        },
+        {
+          "path": "src/sub/index.ts",
+          "sha256": "147cfcc6239b05ef5b76fdcdc774e1de8e88e5a49383cee1c9974ded791902e4"
+        },
+        {
+          "path": "src/subDays/index.ts",
+          "sha256": "f331633d78fcc5c8f82f37a5a226bebeda4e8f1eec448bb87df6f777c4dac559"
+        },
+        {
+          "path": "src/subMonths/index.ts",
+          "sha256": "3ec6ba329b2859673166d0c21294ca9b81febf226b4935fb9d9b9d921cdab660"
+        },
+        {
+          "path": "src/toDate/index.ts",
+          "sha256": "1ce328da42e0c6c3258b0253ff434306e8980789a4879415f4a687f7e239d9b6"
+        },
+        {
+          "path": "src/types.ts",
+          "sha256": "0cfad83a7c9bb9fc63cf3c929d377b402518967205d0fecb357936d679a7ea98"
+        },
+        {
+          "path": "analyzer.yaml",
+          "sha256": "decc9def7c39530603da1bb88049008065bcc1f6c72dfb8f7d97ecbf7954d1f0",
+          "origin": "measurement_config"
+        }
+      ],
+      "calls": [
+        {
+          "id": "src/_lib/getTimezoneOffsetInMilliseconds/index.ts:18:17:toDate",
+          "path": "src/_lib/getTimezoneOffsetInMilliseconds/index.ts",
+          "line": 18,
+          "column": 17,
+          "callee": "toDate",
+          "source_line": "  const _date = toDate(date);",
+          "expected": {
+            "path": "src/toDate/index.ts",
+            "name": "toDate",
+            "line": 42
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/_lib/normalizeInterval/index.ts:8:24:normalizeDates",
+          "path": "src/_lib/normalizeInterval/index.ts",
+          "line": 8,
+          "column": 24,
+          "callee": "normalizeDates",
+          "source_line": "  const [start, end] = normalizeDates(context, interval.start, interval.end);",
+          "expected": {
+            "path": "src/_lib/normalizeDates/index.ts",
+            "name": "normalizeDates",
+            "line": 19
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/add/index.ts:59:17:toDate",
+          "path": "src/add/index.ts",
+          "line": 59,
+          "column": 17,
+          "callee": "toDate",
+          "source_line": "  const _date = toDate(date, options?.in);",
+          "expected": {
+            "path": "src/toDate/index.ts",
+            "name": "toDate",
+            "line": 42
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/add/index.ts:61:23:addMonths",
+          "path": "src/add/index.ts",
+          "line": 61,
+          "column": 23,
+          "callee": "addMonths",
+          "source_line": "    months || years ? addMonths(_date, months + years * 12) : _date;",
+          "expected": {
+            "path": "src/addMonths/index.ts",
+            "name": "addMonths",
+            "line": 37
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/add/index.ts:65:21:addDays",
+          "path": "src/add/index.ts",
+          "line": 65,
+          "column": 21,
+          "callee": "addDays",
+          "source_line": "    days || weeks ? addDays(dateWithMonths, days + weeks * 7) : dateWithMonths;",
+          "expected": {
+            "path": "src/addDays/index.ts",
+            "name": "addDays",
+            "line": 33
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/add/index.ts:72:10:constructFrom",
+          "path": "src/add/index.ts",
+          "line": 72,
+          "column": 10,
+          "callee": "constructFrom",
+          "source_line": "  return constructFrom(options?.in || date, +dateWithDays + msToAdd);",
+          "expected": {
+            "path": "src/constructFrom/index.ts",
+            "name": "constructFrom",
+            "line": 44
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/addDays/index.ts:41:17:toDate",
+          "path": "src/addDays/index.ts",
+          "line": 41,
+          "column": 17,
+          "callee": "toDate",
+          "source_line": "  const _date = toDate(date, options?.in);",
+          "expected": {
+            "path": "src/toDate/index.ts",
+            "name": "toDate",
+            "line": 42
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/addDays/index.ts:42:29:constructFrom",
+          "path": "src/addDays/index.ts",
+          "line": 42,
+          "column": 29,
+          "callee": "constructFrom",
+          "source_line": "  if (isNaN(amount)) return constructFrom(options?.in || date, NaN);",
+          "expected": {
+            "path": "src/constructFrom/index.ts",
+            "name": "constructFrom",
+            "line": 44
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/addMonths/index.ts:45:17:toDate",
+          "path": "src/addMonths/index.ts",
+          "line": 45,
+          "column": 17,
+          "callee": "toDate",
+          "source_line": "  const _date = toDate(date, options?.in);",
+          "expected": {
+            "path": "src/toDate/index.ts",
+            "name": "toDate",
+            "line": 42
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/addMonths/index.ts:46:29:constructFrom",
+          "path": "src/addMonths/index.ts",
+          "line": 46,
+          "column": 29,
+          "callee": "constructFrom",
+          "source_line": "  if (isNaN(amount)) return constructFrom(options?.in || date, NaN);",
+          "expected": {
+            "path": "src/constructFrom/index.ts",
+            "name": "constructFrom",
+            "line": 44
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/addMonths/index.ts:61:29:constructFrom",
+          "path": "src/addMonths/index.ts",
+          "line": 61,
+          "column": 29,
+          "callee": "constructFrom",
+          "source_line": "  const endOfDesiredMonth = constructFrom(options?.in || date, _date.getTime());",
+          "expected": {
+            "path": "src/constructFrom/index.ts",
+            "name": "constructFrom",
+            "line": 44
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/addWeeks/index.ts:40:10:addDays",
+          "path": "src/addWeeks/index.ts",
+          "line": 40,
+          "column": 10,
+          "callee": "addDays",
+          "source_line": "  return addDays(date, amount * 7, options);",
+          "expected": {
+            "path": "src/addDays/index.ts",
+            "name": "addDays",
+            "line": 33
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/constructFrom/index.ts:51:42:date",
+          "path": "src/constructFrom/index.ts",
+          "line": 51,
+          "column": 42,
+          "callee": "date",
+          "source_line": "  if (typeof date === \"function\") return date(value);",
+          "expected": null,
+          "category": "callable_parameter"
+        },
+        {
+          "id": "src/differenceInBusinessDays/index.ts:69:38:normalizeDates",
+          "path": "src/differenceInBusinessDays/index.ts",
+          "line": 69,
+          "column": 38,
+          "callee": "normalizeDates",
+          "source_line": "  const [laterDate_, earlierDate_] = normalizeDates(",
+          "expected": {
+            "path": "src/_lib/normalizeDates/index.ts",
+            "name": "normalizeDates",
+            "line": 19
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/differenceInBusinessDays/index.ts:75:8:isValid",
+          "path": "src/differenceInBusinessDays/index.ts",
+          "line": 75,
+          "column": 8,
+          "callee": "isValid",
+          "source_line": "  if (!isValid(laterDate_) || !isValid(earlierDate_)) return NaN;",
+          "expected": {
+            "path": "src/isValid/index.ts",
+            "name": "isValid",
+            "line": 35
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/differenceInBusinessDays/index.ts:75:32:isValid",
+          "path": "src/differenceInBusinessDays/index.ts",
+          "line": 75,
+          "column": 32,
+          "callee": "isValid",
+          "source_line": "  if (!isValid(laterDate_) || !isValid(earlierDate_)) return NaN;",
+          "expected": {
+            "path": "src/isValid/index.ts",
+            "name": "isValid",
+            "line": 35
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/differenceInBusinessDays/index.ts:77:16:differenceInCalendarDays",
+          "path": "src/differenceInBusinessDays/index.ts",
+          "line": 77,
+          "column": 16,
+          "callee": "differenceInCalendarDays",
+          "source_line": "  const diff = differenceInCalendarDays(laterDate_, earlierDate_);",
+          "expected": {
+            "path": "src/differenceInCalendarDays/index.ts",
+            "name": "differenceInCalendarDays",
+            "line": 43
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/differenceInBusinessDays/index.ts:82:20:addDays",
+          "path": "src/differenceInBusinessDays/index.ts",
+          "line": 82,
+          "column": 20,
+          "callee": "addDays",
+          "source_line": "  let movingDate = addDays(earlierDate_, weeks * 7);",
+          "expected": {
+            "path": "src/addDays/index.ts",
+            "name": "addDays",
+            "line": 33
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/differenceInBusinessDays/index.ts:85:11:isSameDay",
+          "path": "src/differenceInBusinessDays/index.ts",
+          "line": 85,
+          "column": 11,
+          "callee": "isSameDay",
+          "source_line": "  while (!isSameDay(laterDate_, movingDate)) {",
+          "expected": {
+            "path": "src/isSameDay/index.ts",
+            "name": "isSameDay",
+            "line": 39
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/differenceInBusinessDays/index.ts:87:15:isWeekend",
+          "path": "src/differenceInBusinessDays/index.ts",
+          "line": 87,
+          "column": 15,
+          "callee": "isWeekend",
+          "source_line": "    result += isWeekend(movingDate, options) ? 0 : sign;",
+          "expected": {
+            "path": "src/isWeekend/index.ts",
+            "name": "isWeekend",
+            "line": 27
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/differenceInBusinessDays/index.ts:88:18:addDays",
+          "path": "src/differenceInBusinessDays/index.ts",
+          "line": 88,
+          "column": 18,
+          "callee": "addDays",
+          "source_line": "    movingDate = addDays(movingDate, sign);",
+          "expected": {
+            "path": "src/addDays/index.ts",
+            "name": "addDays",
+            "line": 33
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/differenceInCalendarDays/index.ts:48:38:normalizeDates",
+          "path": "src/differenceInCalendarDays/index.ts",
+          "line": 48,
+          "column": 38,
+          "callee": "normalizeDates",
+          "source_line": "  const [laterDate_, earlierDate_] = normalizeDates(",
+          "expected": {
+            "path": "src/_lib/normalizeDates/index.ts",
+            "name": "normalizeDates",
+            "line": 19
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/differenceInCalendarDays/index.ts:54:27:startOfDay",
+          "path": "src/differenceInCalendarDays/index.ts",
+          "line": 54,
+          "column": 27,
+          "callee": "startOfDay",
+          "source_line": "  const laterStartOfDay = startOfDay(laterDate_);",
+          "expected": {
+            "path": "src/startOfDay/index.ts",
+            "name": "startOfDay",
+            "line": 32
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/differenceInCalendarDays/index.ts:55:29:startOfDay",
+          "path": "src/differenceInCalendarDays/index.ts",
+          "line": 55,
+          "column": 29,
+          "callee": "startOfDay",
+          "source_line": "  const earlierStartOfDay = startOfDay(earlierDate_);",
+          "expected": {
+            "path": "src/startOfDay/index.ts",
+            "name": "startOfDay",
+            "line": 32
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/differenceInCalendarDays/index.ts:58:24:getTimezoneOffsetInMilliseconds",
+          "path": "src/differenceInCalendarDays/index.ts",
+          "line": 58,
+          "column": 24,
+          "callee": "getTimezoneOffsetInMilliseconds",
+          "source_line": "    +laterStartOfDay - getTimezoneOffsetInMilliseconds(laterStartOfDay);",
+          "expected": {
+            "path": "src/_lib/getTimezoneOffsetInMilliseconds/index.ts",
+            "name": "getTimezoneOffsetInMilliseconds",
+            "line": 15
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/differenceInCalendarDays/index.ts:60:26:getTimezoneOffsetInMilliseconds",
+          "path": "src/differenceInCalendarDays/index.ts",
+          "line": 60,
+          "column": 26,
+          "callee": "getTimezoneOffsetInMilliseconds",
+          "source_line": "    +earlierStartOfDay - getTimezoneOffsetInMilliseconds(earlierStartOfDay);",
+          "expected": {
+            "path": "src/_lib/getTimezoneOffsetInMilliseconds/index.ts",
+            "name": "getTimezoneOffsetInMilliseconds",
+            "line": 15
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/differenceInDays/index.ts:68:38:normalizeDates",
+          "path": "src/differenceInDays/index.ts",
+          "line": 68,
+          "column": 38,
+          "callee": "normalizeDates",
+          "source_line": "  const [laterDate_, earlierDate_] = normalizeDates(",
+          "expected": {
+            "path": "src/_lib/normalizeDates/index.ts",
+            "name": "normalizeDates",
+            "line": 19
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/differenceInDays/index.ts:74:16:compareLocalAsc",
+          "path": "src/differenceInDays/index.ts",
+          "line": 74,
+          "column": 16,
+          "callee": "compareLocalAsc",
+          "source_line": "  const sign = compareLocalAsc(laterDate_, earlierDate_);",
+          "expected": {
+            "path": "src/differenceInDays/index.ts",
+            "name": "compareLocalAsc",
+            "line": 96
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/differenceInDays/index.ts:76:5:differenceInCalendarDays",
+          "path": "src/differenceInDays/index.ts",
+          "line": 76,
+          "column": 5,
+          "callee": "differenceInCalendarDays",
+          "source_line": "    differenceInCalendarDays(laterDate_, earlierDate_),",
+          "expected": {
+            "path": "src/differenceInCalendarDays/index.ts",
+            "name": "differenceInCalendarDays",
+            "line": 43
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/differenceInDays/index.ts:84:5:compareLocalAsc",
+          "path": "src/differenceInDays/index.ts",
+          "line": 84,
+          "column": 5,
+          "callee": "compareLocalAsc",
+          "source_line": "    compareLocalAsc(laterDate_, earlierDate_) === -sign,",
+          "expected": {
+            "path": "src/differenceInDays/index.ts",
+            "name": "compareLocalAsc",
+            "line": 96
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/eachWeekOfInterval/index.ts:77:26:normalizeInterval",
+          "path": "src/eachWeekOfInterval/index.ts",
+          "line": 77,
+          "column": 26,
+          "callee": "normalizeInterval",
+          "source_line": "  const { start, end } = normalizeInterval(options?.in, interval);",
+          "expected": {
+            "path": "src/_lib/normalizeInterval/index.ts",
+            "name": "normalizeInterval",
+            "line": 4
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/eachWeekOfInterval/index.ts:81:7:startOfWeek",
+          "path": "src/eachWeekOfInterval/index.ts",
+          "line": 81,
+          "column": 7,
+          "callee": "startOfWeek",
+          "source_line": "    ? startOfWeek(end, options)",
+          "expected": {
+            "path": "src/startOfWeek/index.ts",
+            "name": "startOfWeek",
+            "line": 45
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/eachWeekOfInterval/index.ts:82:7:startOfWeek",
+          "path": "src/eachWeekOfInterval/index.ts",
+          "line": 82,
+          "column": 7,
+          "callee": "startOfWeek",
+          "source_line": "    : startOfWeek(start, options);",
+          "expected": {
+            "path": "src/startOfWeek/index.ts",
+            "name": "startOfWeek",
+            "line": 45
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/eachWeekOfInterval/index.ts:84:7:startOfWeek",
+          "path": "src/eachWeekOfInterval/index.ts",
+          "line": 84,
+          "column": 7,
+          "callee": "startOfWeek",
+          "source_line": "    ? startOfWeek(start, options)",
+          "expected": {
+            "path": "src/startOfWeek/index.ts",
+            "name": "startOfWeek",
+            "line": 45
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/eachWeekOfInterval/index.ts:85:7:startOfWeek",
+          "path": "src/eachWeekOfInterval/index.ts",
+          "line": 85,
+          "column": 7,
+          "callee": "startOfWeek",
+          "source_line": "    : startOfWeek(end, options);",
+          "expected": {
+            "path": "src/startOfWeek/index.ts",
+            "name": "startOfWeek",
+            "line": 45
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/eachWeekOfInterval/index.ts:104:16:constructFrom",
+          "path": "src/eachWeekOfInterval/index.ts",
+          "line": 104,
+          "column": 16,
+          "callee": "constructFrom",
+          "source_line": "    dates.push(constructFrom(start, currentDate));",
+          "expected": {
+            "path": "src/constructFrom/index.ts",
+            "name": "constructFrom",
+            "line": 44
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/eachWeekOfInterval/index.ts:105:19:addWeeks",
+          "path": "src/eachWeekOfInterval/index.ts",
+          "line": 105,
+          "column": 19,
+          "callee": "addWeeks",
+          "source_line": "    currentDate = addWeeks(currentDate, step);",
+          "expected": {
+            "path": "src/addWeeks/index.ts",
+            "name": "addWeeks",
+            "line": 32
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/endOfWeek/index.ts:49:26:getDefaultOptions",
+          "path": "src/endOfWeek/index.ts",
+          "line": 49,
+          "column": 26,
+          "callee": "getDefaultOptions",
+          "source_line": "  const defaultOptions = getDefaultOptions();",
+          "expected": {
+            "path": "src/_lib/defaultOptions/index.ts",
+            "name": "getDefaultOptions",
+            "line": 14
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/endOfWeek/index.ts:57:17:toDate",
+          "path": "src/endOfWeek/index.ts",
+          "line": 57,
+          "column": 17,
+          "callee": "toDate",
+          "source_line": "  const _date = toDate(date, options?.in);",
+          "expected": {
+            "path": "src/toDate/index.ts",
+            "name": "toDate",
+            "line": 42
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/isSameDay/index.ts:44:35:normalizeDates",
+          "path": "src/isSameDay/index.ts",
+          "line": 44,
+          "column": 35,
+          "callee": "normalizeDates",
+          "source_line": "  const [dateLeft_, dateRight_] = normalizeDates(",
+          "expected": {
+            "path": "src/_lib/normalizeDates/index.ts",
+            "name": "normalizeDates",
+            "line": 19
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/isSameDay/index.ts:49:11:startOfDay",
+          "path": "src/isSameDay/index.ts",
+          "line": 49,
+          "column": 11,
+          "callee": "startOfDay",
+          "source_line": "  return +startOfDay(dateLeft_) === +startOfDay(dateRight_);",
+          "expected": {
+            "path": "src/startOfDay/index.ts",
+            "name": "startOfDay",
+            "line": 32
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/isSameDay/index.ts:49:38:startOfDay",
+          "path": "src/isSameDay/index.ts",
+          "line": 49,
+          "column": 38,
+          "callee": "startOfDay",
+          "source_line": "  return +startOfDay(dateLeft_) === +startOfDay(dateRight_);",
+          "expected": {
+            "path": "src/startOfDay/index.ts",
+            "name": "startOfDay",
+            "line": 32
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/isValid/index.ts:36:14:isDate",
+          "path": "src/isValid/index.ts",
+          "line": 36,
+          "column": 14,
+          "callee": "isDate",
+          "source_line": "  return !((!isDate(date) && typeof date !== \"number\") || isNaN(+toDate(date)));",
+          "expected": {
+            "path": "src/isDate/index.ts",
+            "name": "isDate",
+            "line": 33
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/isValid/index.ts:36:66:toDate",
+          "path": "src/isValid/index.ts",
+          "line": 36,
+          "column": 66,
+          "callee": "toDate",
+          "source_line": "  return !((!isDate(date) && typeof date !== \"number\") || isNaN(+toDate(date)));",
+          "expected": {
+            "path": "src/toDate/index.ts",
+            "name": "toDate",
+            "line": 42
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/isWeekend/index.ts:31:15:toDate",
+          "path": "src/isWeekend/index.ts",
+          "line": 31,
+          "column": 15,
+          "callee": "toDate",
+          "source_line": "  const day = toDate(date, options?.in).getDay();",
+          "expected": {
+            "path": "src/toDate/index.ts",
+            "name": "toDate",
+            "line": 42
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/startOfDay/index.ts:39:17:toDate",
+          "path": "src/startOfDay/index.ts",
+          "line": 39,
+          "column": 17,
+          "callee": "toDate",
+          "source_line": "  const _date = toDate(date, options?.in);",
+          "expected": {
+            "path": "src/toDate/index.ts",
+            "name": "toDate",
+            "line": 42
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/startOfWeek/index.ts:52:26:getDefaultOptions",
+          "path": "src/startOfWeek/index.ts",
+          "line": 52,
+          "column": 26,
+          "callee": "getDefaultOptions",
+          "source_line": "  const defaultOptions = getDefaultOptions();",
+          "expected": {
+            "path": "src/_lib/defaultOptions/index.ts",
+            "name": "getDefaultOptions",
+            "line": 14
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/startOfWeek/index.ts:60:17:toDate",
+          "path": "src/startOfWeek/index.ts",
+          "line": 60,
+          "column": 17,
+          "callee": "toDate",
+          "source_line": "  const _date = toDate(date, options?.in);",
+          "expected": {
+            "path": "src/toDate/index.ts",
+            "name": "toDate",
+            "line": 42
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/sub/index.ts:69:25:subMonths",
+          "path": "src/sub/index.ts",
+          "line": 69,
+          "column": 25,
+          "callee": "subMonths",
+          "source_line": "  const withoutMonths = subMonths(date, months + years * 12, options);",
+          "expected": {
+            "path": "src/subMonths/index.ts",
+            "name": "subMonths",
+            "line": 32
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/sub/index.ts:70:23:subDays",
+          "path": "src/sub/index.ts",
+          "line": 70,
+          "column": 23,
+          "callee": "subDays",
+          "source_line": "  const withoutDays = subDays(withoutMonths, days + weeks * 7, options);",
+          "expected": {
+            "path": "src/subDays/index.ts",
+            "name": "subDays",
+            "line": 29
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/sub/index.ts:76:10:constructFrom",
+          "path": "src/sub/index.ts",
+          "line": 76,
+          "column": 10,
+          "callee": "constructFrom",
+          "source_line": "  return constructFrom(options?.in || date, +withoutDays - msToSub);",
+          "expected": {
+            "path": "src/constructFrom/index.ts",
+            "name": "constructFrom",
+            "line": 44
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/subDays/index.ts:37:10:addDays",
+          "path": "src/subDays/index.ts",
+          "line": 37,
+          "column": 10,
+          "callee": "addDays",
+          "source_line": "  return addDays(date, -amount, options);",
+          "expected": {
+            "path": "src/addDays/index.ts",
+            "name": "addDays",
+            "line": 33
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/subMonths/index.ts:40:10:addMonths",
+          "path": "src/subMonths/index.ts",
+          "line": 40,
+          "column": 10,
+          "callee": "addMonths",
+          "source_line": "  return addMonths(date, -amount, options);",
+          "expected": {
+            "path": "src/addMonths/index.ts",
+            "name": "addMonths",
+            "line": 37
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "src/toDate/index.ts:50:10:constructFrom",
+          "path": "src/toDate/index.ts",
+          "line": 50,
+          "column": 10,
+          "callee": "constructFrom",
+          "source_line": "  return constructFrom(context || argument, argument);",
+          "expected": {
+            "path": "src/constructFrom/index.ts",
+            "name": "constructFrom",
+            "line": 44
+          },
+          "category": "source_function"
+        }
+      ],
+      "minimum_static_calls": 53,
+      "minimum_dynamic_calls": 1
+    },
+    {
+      "id": "regex-lite",
+      "repository": "https://github.com/rust-lang/regex",
+      "revision": "72d650cb0a880a01ab6dc2137c0888e8f89740f7",
+      "version": "regex-lite 0.1.9 source snapshot",
+      "language": "rust",
+      "license": "MIT OR Apache-2.0",
+      "selection": {
+        "helper_modules": [
+          "regex-lite/src/utf8.rs",
+          "regex-lite/src/interpolate.rs",
+          "regex-lite/src/hir/mod.rs",
+          "regex-lite/src/hir/parse.rs"
+        ],
+        "helper_names": [
+          "check_hir_nesting",
+          "decode",
+          "decode_lossy",
+          "decode_step",
+          "escape",
+          "find_cap_ref",
+          "find_cap_ref_braced",
+          "into_class_item_range",
+          "into_class_item_ranges",
+          "is_capture_char",
+          "is_escapable_character",
+          "is_hex",
+          "is_meta_character",
+          "is_valid_cap_letter",
+          "is_word_byte",
+          "next_char",
+          "posix_class",
+          "prev_char",
+          "string"
+        ],
+        "scope": "All direct calls to the top-level free functions declared in the four helper modules, throughout every regex-lite/src production file before its first cfg(test) section. Qualified module calls and local helper calls are both included. Callable-parameter append/name_to_index calls in interpolate::string are separate dynamic controls. Methods, macro bodies, standard library/external calls and function-value references are outside this family."
+      },
+      "files": [
+        {
+          "path": "Cargo.toml",
+          "sha256": "e060af2cec7da6c4ea99bb51c59caa6844b0893d9961aa562845c9f672bfbcbc"
+        },
+        {
+          "path": "LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "path": "LICENSE-MIT",
+          "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb"
+        },
+        {
+          "path": "regex-lite/Cargo.toml",
+          "sha256": "0723a0f2a31737ca59f5a3645bb490f0b7e384133996bb2560a93c12fa9b64e8"
+        },
+        {
+          "path": "regex-lite/src/error.rs",
+          "sha256": "ecaa257603c21bbbd81f7053228f0854682c525351f51641a0455fe904dad072"
+        },
+        {
+          "path": "regex-lite/src/hir/mod.rs",
+          "sha256": "62b1d6a41482e67da835c68b34caf6a21f35f874b45bd80ab4923167db7d72d2"
+        },
+        {
+          "path": "regex-lite/src/hir/parse.rs",
+          "sha256": "a53435d9f11672a7cc7507ac4d62d52816761afd9a5804d1996a450546c82c42"
+        },
+        {
+          "path": "regex-lite/src/int.rs",
+          "sha256": "9edcc6cb977d9af2618cf2ad4af6883b05f94ec1537aec7c36f26bb2630bc7fa"
+        },
+        {
+          "path": "regex-lite/src/interpolate.rs",
+          "sha256": "2a11581b6a8a5dfeae48994ae3e72c266754fa3f9a44dda541294abc086a91a4"
+        },
+        {
+          "path": "regex-lite/src/lib.rs",
+          "sha256": "ccbfe4cbe75bfce4ddd746acc1b3ff276957b6a71864f6c01953d038aef973ad"
+        },
+        {
+          "path": "regex-lite/src/nfa.rs",
+          "sha256": "1b97b603edccc841ac3806141aa308cc5a892adbdbd3fa7ba0fd7cc1d9040c85"
+        },
+        {
+          "path": "regex-lite/src/pikevm.rs",
+          "sha256": "ea5288950a38fd3ca7d4587f268831fa08695f0e9d9d9533268ee2b6f67a06b0"
+        },
+        {
+          "path": "regex-lite/src/pool.rs",
+          "sha256": "cc601179f15af327e82e3314e60635610b86af742aa57f1edd11e2f9f690fb27"
+        },
+        {
+          "path": "regex-lite/src/string.rs",
+          "sha256": "c5d126c2d6fde8c00c5f0e9fbfe762ec042cef440081e79372b270e1110da90e"
+        },
+        {
+          "path": "regex-lite/src/utf8.rs",
+          "sha256": "82779d49cd7135e7f43a3e2cfe55b8718acf29e62b3aab4d4499114199dae2de"
+        },
+        {
+          "path": "analyzer.yaml",
+          "sha256": "c17c946803f61a9820668e5db9315c3ac415c35e67c13a0ace47810985552943",
+          "origin": "measurement_config"
+        }
+      ],
+      "calls": [
+        {
+          "id": "regex-lite/src/hir/mod.rs:15:12:is_meta_character",
+          "path": "regex-lite/src/hir/mod.rs",
+          "line": 15,
+          "column": 12,
+          "callee": "is_meta_character",
+          "source_line": "        if is_meta_character(ch) {",
+          "expected": {
+            "path": "regex-lite/src/hir/mod.rs",
+            "name": "is_meta_character",
+            "line": 45
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/mod.rs:73:8:is_meta_character",
+          "path": "regex-lite/src/hir/mod.rs",
+          "line": 73,
+          "column": 8,
+          "callee": "is_meta_character",
+          "source_line": "    if is_meta_character(c) {",
+          "expected": {
+            "path": "regex-lite/src/hir/mod.rs",
+            "name": "is_meta_character",
+            "line": 45
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/mod.rs:439:22:prev_char",
+          "path": "regex-lite/src/hir/mod.rs",
+          "line": 439,
+          "column": 22,
+          "callee": "prev_char",
+          "source_line": "                end: prev_char(self.ranges[0].start).unwrap(),",
+          "expected": {
+            "path": "regex-lite/src/hir/mod.rs",
+            "name": "prev_char",
+            "line": 759
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/mod.rs:451:24:next_char",
+          "path": "regex-lite/src/hir/mod.rs",
+          "line": 451,
+          "column": 24,
+          "callee": "next_char",
+          "source_line": "                start: next_char(self.ranges[i - 1].end).unwrap(),",
+          "expected": {
+            "path": "regex-lite/src/hir/mod.rs",
+            "name": "next_char",
+            "line": 750
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/mod.rs:456:22:prev_char",
+          "path": "regex-lite/src/hir/mod.rs",
+          "line": 456,
+          "column": 22,
+          "callee": "prev_char",
+          "source_line": "                end: prev_char(self.ranges[i].start).unwrap(),",
+          "expected": {
+            "path": "regex-lite/src/hir/mod.rs",
+            "name": "prev_char",
+            "line": 759
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/mod.rs:465:24:next_char",
+          "path": "regex-lite/src/hir/mod.rs",
+          "line": 465,
+          "column": 24,
+          "callee": "next_char",
+          "source_line": "                start: next_char(self.ranges[drain_end - 1].end).unwrap(),",
+          "expected": {
+            "path": "regex-lite/src/hir/mod.rs",
+            "name": "next_char",
+            "line": 750
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/mod.rs:658:37:is_word_byte",
+          "path": "regex-lite/src/hir/mod.rs",
+          "line": 658,
+          "column": 37,
+          "callee": "is_word_byte",
+          "source_line": "                    at > 0 && utf8::is_word_byte(haystack[at - 1]);",
+          "expected": {
+            "path": "regex-lite/src/utf8.rs",
+            "name": "is_word_byte",
+            "line": 3
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/mod.rs:660:50:is_word_byte",
+          "path": "regex-lite/src/hir/mod.rs",
+          "line": 660,
+          "column": 50,
+          "callee": "is_word_byte",
+          "source_line": "                    at < haystack.len() && utf8::is_word_byte(haystack[at]);",
+          "expected": {
+            "path": "regex-lite/src/utf8.rs",
+            "name": "is_word_byte",
+            "line": 3
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/mod.rs:665:37:is_word_byte",
+          "path": "regex-lite/src/hir/mod.rs",
+          "line": 665,
+          "column": 37,
+          "callee": "is_word_byte",
+          "source_line": "                    at > 0 && utf8::is_word_byte(haystack[at - 1]);",
+          "expected": {
+            "path": "regex-lite/src/utf8.rs",
+            "name": "is_word_byte",
+            "line": 3
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/mod.rs:667:50:is_word_byte",
+          "path": "regex-lite/src/hir/mod.rs",
+          "line": 667,
+          "column": 50,
+          "callee": "is_word_byte",
+          "source_line": "                    at < haystack.len() && utf8::is_word_byte(haystack[at]);",
+          "expected": {
+            "path": "regex-lite/src/utf8.rs",
+            "name": "is_word_byte",
+            "line": 3
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/mod.rs:672:37:is_word_byte",
+          "path": "regex-lite/src/hir/mod.rs",
+          "line": 672,
+          "column": 37,
+          "callee": "is_word_byte",
+          "source_line": "                    at > 0 && utf8::is_word_byte(haystack[at - 1]);",
+          "expected": {
+            "path": "regex-lite/src/utf8.rs",
+            "name": "is_word_byte",
+            "line": 3
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/mod.rs:674:50:is_word_byte",
+          "path": "regex-lite/src/hir/mod.rs",
+          "line": 674,
+          "column": 50,
+          "callee": "is_word_byte",
+          "source_line": "                    at < haystack.len() && utf8::is_word_byte(haystack[at]);",
+          "expected": {
+            "path": "regex-lite/src/utf8.rs",
+            "name": "is_word_byte",
+            "line": 3
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/mod.rs:679:37:is_word_byte",
+          "path": "regex-lite/src/hir/mod.rs",
+          "line": 679,
+          "column": 37,
+          "callee": "is_word_byte",
+          "source_line": "                    at > 0 && utf8::is_word_byte(haystack[at - 1]);",
+          "expected": {
+            "path": "regex-lite/src/utf8.rs",
+            "name": "is_word_byte",
+            "line": 3
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/mod.rs:681:50:is_word_byte",
+          "path": "regex-lite/src/hir/mod.rs",
+          "line": 681,
+          "column": 50,
+          "callee": "is_word_byte",
+          "source_line": "                    at < haystack.len() && utf8::is_word_byte(haystack[at]);",
+          "expected": {
+            "path": "regex-lite/src/utf8.rs",
+            "name": "is_word_byte",
+            "line": 3
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/mod.rs:686:37:is_word_byte",
+          "path": "regex-lite/src/hir/mod.rs",
+          "line": 686,
+          "column": 37,
+          "callee": "is_word_byte",
+          "source_line": "                    at > 0 && utf8::is_word_byte(haystack[at - 1]);",
+          "expected": {
+            "path": "regex-lite/src/utf8.rs",
+            "name": "is_word_byte",
+            "line": 3
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/mod.rs:691:50:is_word_byte",
+          "path": "regex-lite/src/hir/mod.rs",
+          "line": 691,
+          "column": 50,
+          "callee": "is_word_byte",
+          "source_line": "                    at < haystack.len() && utf8::is_word_byte(haystack[at]);",
+          "expected": {
+            "path": "regex-lite/src/utf8.rs",
+            "name": "is_word_byte",
+            "line": 3
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/parse.rs:393:9:check_hir_nesting",
+          "path": "regex-lite/src/hir/parse.rs",
+          "line": 393,
+          "column": 9,
+          "callee": "check_hir_nesting",
+          "source_line": "        check_hir_nesting(&hir, self.config.nest_limit)?;",
+          "expected": {
+            "path": "regex-lite/src/hir/parse.rs",
+            "name": "check_hir_nesting",
+            "line": 1285
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/parse.rs:493:17:is_meta_character",
+          "path": "regex-lite/src/hir/parse.rs",
+          "line": 493,
+          "column": 17,
+          "callee": "is_meta_character",
+          "source_line": "        if hir::is_meta_character(ch) || hir::is_escapable_character(ch) {",
+          "expected": {
+            "path": "regex-lite/src/hir/mod.rs",
+            "name": "is_meta_character",
+            "line": 45
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/parse.rs:493:47:is_escapable_character",
+          "path": "regex-lite/src/hir/parse.rs",
+          "line": 493,
+          "column": 47,
+          "callee": "is_escapable_character",
+          "source_line": "        if hir::is_meta_character(ch) || hir::is_escapable_character(ch) {",
+          "expected": {
+            "path": "regex-lite/src/hir/mod.rs",
+            "name": "is_escapable_character",
+            "line": 71
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/parse.rs:622:17:is_hex",
+          "path": "regex-lite/src/hir/parse.rs",
+          "line": 622,
+          "column": 17,
+          "callee": "is_hex",
+          "source_line": "            if !is_hex(self.char()) {",
+          "expected": {
+            "path": "regex-lite/src/hir/parse.rs",
+            "name": "is_hex",
+            "line": 1377
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/parse.rs:642:17:is_hex",
+          "path": "regex-lite/src/hir/parse.rs",
+          "line": 642,
+          "column": 17,
+          "callee": "is_hex",
+          "source_line": "            if !is_hex(self.char()) {",
+          "expected": {
+            "path": "regex-lite/src/hir/parse.rs",
+            "name": "is_hex",
+            "line": 1377
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/parse.rs:869:17:is_capture_char",
+          "path": "regex-lite/src/hir/parse.rs",
+          "line": 869,
+          "column": 17,
+          "callee": "is_capture_char",
+          "source_line": "            if !is_capture_char(self.char(), self.pos() == start) {",
+          "expected": {
+            "path": "regex-lite/src/hir/parse.rs",
+            "name": "is_capture_char",
+            "line": 1385
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/parse.rs:1091:38:into_class_item_ranges",
+          "path": "regex-lite/src/hir/parse.rs",
+          "line": 1091,
+          "column": 38,
+          "callee": "into_class_item_ranges",
+          "source_line": "            union.extend_from_slice(&into_class_item_ranges(prim1)?);",
+          "expected": {
+            "path": "regex-lite/src/hir/parse.rs",
+            "name": "into_class_item_ranges",
+            "line": 1330
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/parse.rs:1101:20:into_class_item_range",
+          "path": "regex-lite/src/hir/parse.rs",
+          "line": 1101,
+          "column": 20,
+          "callee": "into_class_item_range",
+          "source_line": "            start: into_class_item_range(prim1)?,",
+          "expected": {
+            "path": "regex-lite/src/hir/parse.rs",
+            "name": "into_class_item_range",
+            "line": 1323
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/parse.rs:1102:18:into_class_item_range",
+          "path": "regex-lite/src/hir/parse.rs",
+          "line": 1102,
+          "column": 18,
+          "callee": "into_class_item_range",
+          "source_line": "            end: into_class_item_range(prim2)?,",
+          "expected": {
+            "path": "regex-lite/src/hir/parse.rs",
+            "name": "into_class_item_range",
+            "line": 1323
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/parse.rs:1197:29:posix_class",
+          "path": "regex-lite/src/hir/parse.rs",
+          "line": 1197,
+          "column": 29,
+          "callee": "posix_class",
+          "source_line": "        if let Ok(ranges) = posix_class(name) {",
+          "expected": {
+            "path": "regex-lite/src/hir/parse.rs",
+            "name": "posix_class",
+            "line": 1343
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/parse.rs:1215:26:posix_class",
+          "path": "regex-lite/src/hir/parse.rs",
+          "line": 1215,
+          "column": 26,
+          "callee": "posix_class",
+          "source_line": "            'd' | 'D' => posix_class(\"digit\").unwrap(),",
+          "expected": {
+            "path": "regex-lite/src/hir/parse.rs",
+            "name": "posix_class",
+            "line": 1343
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/parse.rs:1216:26:posix_class",
+          "path": "regex-lite/src/hir/parse.rs",
+          "line": 1216,
+          "column": 26,
+          "callee": "posix_class",
+          "source_line": "            's' | 'S' => posix_class(\"space\").unwrap(),",
+          "expected": {
+            "path": "regex-lite/src/hir/parse.rs",
+            "name": "posix_class",
+            "line": 1343
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/hir/parse.rs:1217:26:posix_class",
+          "path": "regex-lite/src/hir/parse.rs",
+          "line": 1217,
+          "column": 26,
+          "callee": "posix_class",
+          "source_line": "            'w' | 'W' => posix_class(\"word\").unwrap(),",
+          "expected": {
+            "path": "regex-lite/src/hir/parse.rs",
+            "name": "posix_class",
+            "line": 1343
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/interpolate.rs:88:29:find_cap_ref",
+          "path": "regex-lite/src/interpolate.rs",
+          "line": 88,
+          "column": 29,
+          "callee": "find_cap_ref",
+          "source_line": "        let cap_ref = match find_cap_ref(replacement.as_bytes()) {",
+          "expected": {
+            "path": "regex-lite/src/interpolate.rs",
+            "name": "find_cap_ref",
+            "line": 213
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/interpolate.rs:98:31:append",
+          "path": "regex-lite/src/interpolate.rs",
+          "line": 98,
+          "column": 31,
+          "callee": "append",
+          "source_line": "            Ref::Number(i) => append(i, dst),",
+          "expected": null,
+          "category": "callable_parameter"
+        },
+        {
+          "id": "regex-lite/src/interpolate.rs:100:34:name_to_index",
+          "path": "regex-lite/src/interpolate.rs",
+          "line": 100,
+          "column": 34,
+          "callee": "name_to_index",
+          "source_line": "                if let Some(i) = name_to_index(name) {",
+          "expected": null,
+          "category": "callable_parameter"
+        },
+        {
+          "id": "regex-lite/src/interpolate.rs:101:21:append",
+          "path": "regex-lite/src/interpolate.rs",
+          "line": 101,
+          "column": 21,
+          "callee": "append",
+          "source_line": "                    append(i, dst);",
+          "expected": null,
+          "category": "callable_parameter"
+        },
+        {
+          "id": "regex-lite/src/interpolate.rs:221:16:find_cap_ref_braced",
+          "path": "regex-lite/src/interpolate.rs",
+          "line": 221,
+          "column": 16,
+          "callee": "find_cap_ref_braced",
+          "source_line": "        return find_cap_ref_braced(rep, i + 1);",
+          "expected": {
+            "path": "regex-lite/src/interpolate.rs",
+            "name": "find_cap_ref_braced",
+            "line": 248
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/pikevm.rs:163:35:decode_lossy",
+          "path": "regex-lite/src/pikevm.rs",
+          "line": 163,
+          "column": 35,
+          "callee": "decode_lossy",
+          "source_line": "            let (ch, len) = utf8::decode_lossy(&haystack[at..]);",
+          "expected": {
+            "path": "regex-lite/src/utf8.rs",
+            "name": "decode_lossy",
+            "line": 39
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/pikevm.rs:495:41:decode",
+          "path": "regex-lite/src/pikevm.rs",
+          "line": 495,
+          "column": 41,
+          "callee": "decode",
+          "source_line": "                core::cmp::max(1, utf8::decode(&self.haystack[self.at..]).1);",
+          "expected": {
+            "path": "regex-lite/src/utf8.rs",
+            "name": "decode",
+            "line": 56
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/string.rs:1864:22:string",
+          "path": "regex-lite/src/string.rs",
+          "line": 1864,
+          "column": 22,
+          "callee": "string",
+          "source_line": "        interpolate::string(",
+          "expected": {
+            "path": "regex-lite/src/interpolate.rs",
+            "name": "string",
+            "line": 67
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/utf8.rs:40:11:decode",
+          "path": "regex-lite/src/utf8.rs",
+          "line": 40,
+          "column": 11,
+          "callee": "decode",
+          "source_line": "    match decode(slice) {",
+          "expected": {
+            "path": "regex-lite/src/utf8.rs",
+            "name": "decode",
+            "line": 56
+          },
+          "category": "source_function"
+        },
+        {
+          "id": "regex-lite/src/utf8.rs:66:9:decode_step",
+          "path": "regex-lite/src/utf8.rs",
+          "line": 66,
+          "column": 9,
+          "callee": "decode_step",
+          "source_line": "        decode_step(&mut state, &mut cp, slice[i]);",
+          "expected": {
+            "path": "regex-lite/src/utf8.rs",
+            "name": "decode_step",
+            "line": 86
+          },
+          "category": "source_function"
+        }
+      ],
+      "minimum_static_calls": 36,
+      "minimum_dynamic_calls": 3
+    }
+  ]
+}
