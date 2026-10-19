@@ -1,68 +1,290 @@
 # Codefactor
 
-Codefactor is a local static analyzer for PHP, Rust, Python, JavaScript and TypeScript. It reads source files without executing them and reports code metrics, rule violations, architecture findings and call relationships. The executable includes a web interface for exploring source code and dependencies.
+**Русский** · [English](readme_en.md)
 
-This repository contains the analysis engine, CLI, web interface and language parsers. Separate PHP, Python, TypeScript and Rust packages provide CLI launchers and optional APIs.
+**Разберитесь в структуре кода, проследите зависимости и найдите проблемы сопровождения до начала рефакторинга.**
 
-## Build and run
+Codefactor — статический анализатор с открытым исходным кодом для **PHP, Rust, Python, JavaScript и TypeScript**. Он объединяет метрики кода, графы вызовов, архитектурные проверки и символьные оценки вычислительной сложности в одном исполняемом файле. CLI подходит для автоматизации, а локальный веб-интерфейс — для изучения проекта.
 
-Install the Rust stable toolchain, then build the executable:
+Анализ выполняется на вашем компьютере: Codefactor читает исходные файлы, не исполняя их. Для изучения репозитория не нужно собирать анализируемый проект или запускать приложение. Веб-интерфейс встроен в исполняемый файл; отдельная установка фронтенда, внешние CDN и облачный сервис не требуются.
+
+[Скачать релизы](https://github.com/codefactor-app/core/releases) · [Сообщить о проблеме](https://github.com/codefactor-app/core/issues) · [Репозитории проекта](https://github.com/codefactor-app) · [Лицензия MIT](LICENSE)
+
+## Содержание
+
+- [Зачем нужен Codefactor](#зачем-нужен-codefactor)
+- [Что анализирует Codefactor](#что-анализирует-codefactor)
+- [Быстрый старт](#быстрый-старт)
+- [Изучение проекта в браузере](#изучение-проекта-в-браузере)
+- [Сценарии работы с CLI](#сценарии-работы-с-cli)
+- [Конфигурация](#конфигурация)
+- [Отчёты и CI](#отчёты-и-ci)
+- [Пакеты для языковых экосистем](#пакеты-для-языковых-экосистем)
+- [Как это работает](#как-это-работает)
+- [Границы анализа](#границы-анализа)
+- [Разработка и участие в проекте](#разработка-и-участие-в-проекте)
+
+## Зачем нужен Codefactor
+
+- **Изучить незнакомый репозиторий.** Просматривайте исходники, функции, модули и связи между ними в одном локальном интерфейсе.
+- **Подготовить рефакторинг.** Прослеживайте входящие и исходящие вызовы, изучайте пути между функциями и сравнивайте зависимости двух частей проекта.
+- **Найти сложные для сопровождения участки.** Выявляйте большие функции, глубокую вложенность, высокую сложность, избыточную связанность и повторяющиеся тела функций.
+- **Проверить архитектуру.** Находите циклы зависимостей и проверяйте заданные границы слоёв по конкретным участкам исходного кода.
+- **Внедрять проверки качества постепенно.** Настраивайте пороги под проект, фиксируйте существующие замечания в baseline и экспортируйте результаты для CI и других инструментов.
+
+## Что анализирует Codefactor
+
+Один движок обрабатывает все пять языков, в том числе смешанные проекты на JavaScript и TypeScript. Область анализа задаётся корневым каталогом и списком включённых языков.
+
+| Область | Доступная информация |
+| --- | --- |
+| Размер и структура | Длина файлов и функций, число параметров, методов и полей класса, глубина вложенности и точки возврата |
+| Сложность и сопровождаемость | Цикломатическая и когнитивная сложность, объём Холстеда, индекс сопровождаемости и доля комментариев |
+| Связанность и связность | Входящие и исходящие связи (fan-in/fan-out), глубина наследования, связность класса LCOM4 и циклы между модулями |
+| Дублирование | Поиск повторяющихся функций по токенам и структурных копий кода |
+| Связи вызовов | Вызывающие и вызываемые функции, пути между ними, места вызовов в исходниках, условия ветвления и уверенность в определении цели |
+| Архитектура | Циклы зависимостей, нарушения заданных границ слоёв и экспериментальные проверки проектных решений |
+| Вычислительная сложность | Символьные оценки роста числа операций в худшем случае с учётом поддерживаемых циклов и вызовов с определёнными целями |
+| Внешние операции | Распознанные обращения к БД, очередям, shell, HTTP и TCP с настраиваемыми правилами сопоставления |
+
+Метрики можно агрегировать по проекту, каталогу, модулю или файлу. Замечания содержат расположение в исходниках, значения показателей и соответствующие пороги. Поддержка конструкций и уверенность в определении целей вызовов зависят от языка; подробнее — в разделе [«Границы анализа»](#границы-анализа).
+
+## Быстрый старт
+
+### Скачать готовый бинарник
+
+Скачайте исполняемый файл для своей платформы из [GitHub Releases](https://github.com/codefactor-app/core/releases). В релизах также доступны манифесты платформ и файл `SHA256SUMS` для проверки скачанных файлов.
+
+| Платформа | x64 | ARM64 |
+| --- | --- | --- |
+| Linux | `codefactor-linux-x64` | `codefactor-linux-arm64` |
+| macOS | `codefactor-darwin-x64` | `codefactor-darwin-arm64` |
+| Windows | `codefactor-win32-x64.exe` | `codefactor-win32-arm64.exe` |
+
+Переименуйте скачанный файл в `codefactor` (`codefactor.exe` на Windows) и поместите его в каталог из `PATH`. На Linux и macOS разрешите исполнение файла:
 
 ```sh
+chmod +x codefactor
+./codefactor --help
+```
+
+Из каталога проекта, который хотите проанализировать:
+
+```sh
+codefactor scan .
+codefactor serve . --port 8080 --open --watch
+```
+
+`scan` выводит сводку, метрики и замечания. `serve` открывает локальный веб-интерфейс, а `--watch` обновляет анализ после изменений исходников. Перейдите по адресу, который выведет сервер; обычно это `http://127.0.0.1:8080/`.
+
+Для первого запуска файл конфигурации не нужен. В качестве корня анализа лучше указывать корневой каталог проекта: тогда метаданные проекта будут доступны для определения импортов и зависимостей. Чтобы ограничить анализ каталогами исходников, используйте [фильтры путей](#конфигурация).
+
+### Собрать из исходников
+
+Установите [стабильный набор инструментов Rust](https://www.rust-lang.org/tools/install) и компилятор C с инструментами сборки для парсеров Tree-sitter, затем выполните:
+
+```sh
+git clone https://github.com/codefactor-app/core.git
+cd core
 cargo build --release --locked -p analyzer-cli --bin codefactor
 ./target/release/codefactor --help
-./target/release/codefactor scan ./src
-./target/release/codefactor serve ./src --port 8080 --watch
+./target/release/codefactor scan /path/to/project
+./target/release/codefactor serve /path/to/project --port 8080 --watch
 ```
 
-Replace `./src` with the project directory to analyze. Open the loopback URL printed by `serve`, normally `http://127.0.0.1:8080/`. The server listens on loopback unless a host is explicitly supplied.
+На Windows исполняемый файл находится в `target\release\codefactor.exe`. Node.js нужен только для тестов моделей веб-интерфейса при разработке; для сборки и запуска CLI он не требуется.
 
-## Common commands
+## Изучение проекта в браузере
 
-With `codefactor` on your `PATH`:
+Локальный интерфейс объединяет пять разделов для работы с анализируемым проектом:
+
+| Раздел | Возможности |
+| --- | --- |
+| Код и структура | Просматривайте файлы и исходники с подсветкой замечаний, изучайте функции и переходите к их графам вызовов |
+| Карта кода | Изучайте вложенные блоки зависимостей или матрицу с группировкой по папкам, пространствам имён, модулям или заданным наборам |
+| Нарушения | Фильтруйте нарушения правил, изучайте подтверждающие участки исходников и переходите к коду |
+| Архитектура | Просматривайте структурные замечания, затронутые сущности и условные рекомендации по проектированию |
+| Критерии анализа | Изучайте действующую конфигурацию, определения метрик и пороги правил |
+
+В графах функций можно раскрывать вызывающие и вызываемые функции, изучать места и условия вызовов, различать вызовы с определёнными, неоднозначными и динамическими целями. Связи между наборами показывают прямые и транзитивные зависимости выбранных каталогов, модулей, классов или именованных групп.
+
+Графы экспортируются в JSON, Markdown, Mermaid, SVG и PNG. Карты кода и связи между наборами также можно сохранять как изображения для ревью и документации. Все скрипты и стили веб-интерфейса встроены в бинарник.
+
+По умолчанию сервер слушает `127.0.0.1`. Интерфейс работает только на чтение и предоставляет исходники проекта подключённым клиентам; указывайте другой `--host`, только если хотите открыть доступ к этим исходникам по сети. Текущий веб-интерфейс и консольные отчёты по умолчанию — на русском языке.
+
+## Сценарии работы с CLI
+
+Запускайте команды из корня анализируемого проекта; `codefactor` должен быть доступен через `PATH`. Замените пути к файлам и полные имена функций из примеров на соответствующие объявления своего проекта.
+
+### Анализ и сравнение метрик
 
 ```sh
-codefactor scan ./src
-codefactor scan ./src --format json --out report.json
-codefactor metrics ./src --group-by directory
-codefactor ast ./src/main.py --format json
-codefactor graph callers 'app.service.Worker.run' --format mermaid
-codefactor config check
-codefactor serve ./src --port 8080
+codefactor scan .
+codefactor scan . --lang python,typescript --all
+codefactor scan . --format json --out report.json
+codefactor metrics . --group-by directory
+codefactor metrics . --group-by file --format json --out metrics.json
+codefactor ast ./src/main.py --format json --out ast.json
 ```
 
-`scan` and `metrics` default to Russian reports with metric explanations. JSON, Markdown and SARIF output are available for integrations. Detailed AST is generated on demand with `codefactor ast`.
+По умолчанию консольный отчёт показывает до 50 замечаний. `--all` выводит все замечания, а `--no-explain` скрывает пояснения метрик. Экспортируемые отчёты содержат все замечания независимо от ограничения консольного вывода. Подробные синтаксические деревья формируются отдельно командой `ast` и не повторяются в каждом отчёте анализа.
 
-Run `codefactor <command> --help` for command options and `codefactor config keys` for supported configuration keys.
+### Изучение вызовов и зависимостей
 
-## Configuration
+```sh
+codefactor graph callers 'app.service.Worker.run' --depth 3 --format mermaid
+codefactor graph callees 'app.service.Worker.run' --with-conditions --format json
+codefactor graph paths --from 'app.main' --to 'app.storage.save' --shortest
+codefactor relations --a 'dir:src/api' --b 'dir:src/storage' --transitive 3 --format md
+codefactor external list --category db
+```
 
-A project may provide `analyzer.yaml`; command-line flags take precedence. For example:
+Если запускаете запросы `graph`, `relations` и `external` вне каталога проекта, укажите `--root /path/to/project`. Селекторы графа используют полное имя или идентификатор объявления; их можно найти в представлении исходного кода и JSON-отчётах. Для связей между наборами доступны селекторы `dir:`, `file:`, `glob:`, `ns:`, `mod:`, `pkg:`, `class:` и `set:`.
+
+Список команд доступен через `codefactor --help`, а параметры установленной версии — через `codefactor <command> --help`.
+
+## Конфигурация
+
+Поместите `analyzer.yaml` или `analyzer.yml` в корень анализа либо выберите файл через `--config`. Пути в фильтрах проекта задаются относительно этого корня. Параметры командной строки имеют приоритет над конфигурацией проекта, а конфигурация проекта — над встроенными значениями по умолчанию.
+
+Пример для проекта с исходниками в `src/`:
 
 ```yaml
 config_version: 1
 languages:
-  enabled: [python, typescript]
+  enabled: [php, rust, python, javascript, typescript]
 paths:
   include: ["src/**"]
-  exclude: ["**/tests/**"]
+  exclude: ["**/tests/**", "**/generated/**"]
 limits:
   function_params: {warn: 4, error: 7}
+  cyclomatic_complexity: {warn: 10, error: 20}
+  nesting_depth: {warn: 3, error: 5}
+architecture:
+  enabled: true
+  profile: strict
 ```
 
-Use `codefactor config check --file analyzer.yaml --strict` to validate a configuration before scanning.
+Проверьте и изучите настройки перед использованием в CI:
 
-## Analysis capabilities
+```sh
+codefactor config check --file analyzer.yaml --strict
+codefactor config show --file analyzer.yaml --resolved
+codefactor config keys
+codefactor scan . --config analyzer.yaml --strict-config
+```
 
-The analyzer estimates symbolic worst-case execution cost, including resolved callees. Tight classes, upper bounds, heuristics and unknown costs are distinguished. Estimates are informational by default; `algorithmic_complexity.limits` enables warnings and errors.
+`config keys` выводит справочник конфигурации, встроенный в установленный бинарник. Дополнительные разделы позволяют задавать пороги по языкам, путям и сущностям, подключать YAML-файлы, настраивать обработку стороннего кода, именованные наборы, распознавание внешних операций, кеширование и форматы отчётов по умолчанию. Поиск исходников учитывает правила игнорирования Git; заданные каталоги стороннего кода обрабатываются отдельно при анализе зависимостей.
 
-Architecture analysis is enabled by default and does not change the CI exit status. The strict profile checks dependency cycles, explicit layer policies and structural code copies. The extended profile adds experimental design checks with source evidence and conditional recommendations.
+### Границы архитектурных слоёв
 
-Call resolution uses source declarations and project metadata. Dynamic behavior, unknown receiver types and unsupported constructs can leave targets unresolved or ambiguous. Analysis coverage describes the available static model. It does not establish all runtime behavior.
+Профиль `strict`, включённый по умолчанию, проверяет циклы зависимостей, явно заданные правила взаимодействия слоёв и структурные копии. Например, чтобы отмечать вызовы из предметной области в инфраструктуру, дополните раздел `architecture`:
 
-## Development
+```yaml
+architecture:
+  profile: strict
+  layers:
+    - name: domain
+      selectors: ["dir:src/domain"]
+    - name: infrastructure
+      selectors: ["dir:src/infrastructure"]
+  forbidden_dependencies:
+    - from: domain
+      to: infrastructure
+```
 
-The source checkout can be built and tested independently:
+`--architecture-profile extended` добавляет экспериментальные проверки проектных решений, в том числе замечания по SOLID и предложения по применению паттернов с подтверждающими участками исходников. Архитектурные замечания носят рекомендательный характер и никогда не влияют на код завершения в CI, в том числе с `--fail-on-warn`. Чтобы отключить архитектурный анализ, используйте `--no-architecture`.
+
+### Пороги алгоритмической сложности
+
+Анализ вычислительной сложности оценивает, как растёт число операций с увеличением размера входа. Он различает точные асимптотические классы, верхние границы, эвристики и неизвестную стоимость, не измеряя время выполнения. По умолчанию оценки информационные. Чтобы включить пороги:
+
+```yaml
+algorithmic_complexity:
+  limits:
+    warn: "N"
+    error: "N*log(N)"
+  unknown: info
+```
+
+Замечание возникает, когда оценка превышает заданный класс; равенство порогу допустимо. Точные асимптотические оценки могут приводить к ошибкам правил, а верхние границы и эвристики — к предупреждениям. Неизвестные операции явно отмечаются и не считаются автоматически операциями с постоянной стоимостью.
+
+## Отчёты и CI
+
+| Формат | Назначение |
+| --- | --- |
+| Консоль | Сводки для интерактивной работы, пояснения метрик и замечания |
+| JSON | Полные данные анализа, метрики, вызовы, диагностика и интеграция с другими инструментами |
+| Markdown | Отчёты для ревью кода и документации проекта |
+| SARIF | Замечания для инструментов, работающих с результатами статического анализа |
+
+Это форматы вывода команды `scan`. Команда `metrics` поддерживает консольный вывод и JSON; у команд работы с графами и AST есть собственные параметры экспорта.
+
+```sh
+codefactor scan . --strict-config --fail-on-warn --format sarif --out codefactor.sarif
+codefactor scan . --format json,md --out report
+codefactor scan . --only-violations --format json --out findings.json
+```
+
+Пример с несколькими форматами создаёт файлы `report.json` и `report.md`. `--only-violations` формирует компактный JSON-отчёт с метаданными, сводкой, замечаниями и диагностикой, без полных данных файлов, метрик и графа. Служебные логи направляются в stderr, отдельно от машиночитаемого вывода в stdout.
+
+| Код завершения | Значение |
+| --- | --- |
+| `0` | Нет блокирующих замечаний; рекомендательные замечания при этом возможны |
+| `1` | Предупреждения при `--fail-on-warn` либо ошибка команды или выполнения |
+| `2` | Ошибки правил анализа |
+| `3` | Синтаксическая ошибка YAML в основном файле конфигурации |
+
+Помимо кода завершения проверяйте stderr и диагностику отчёта: ненулевой код возможен и при успешно записанном отчёте с замечаниями, а нулевой код не подтверждает полноту охвата анализа.
+
+Для существующего проекта создайте baseline — список текущих замечаний, которые будут подавляться в последующих запусках, чтобы сосредоточиться на новых:
+
+```sh
+codefactor baseline create --root .
+codefactor scan . --fail-on-warn
+```
+
+Baseline сохраняется в файле `.analyzer-baseline.json` в корне анализа. Проверьте его и добавьте в систему контроля версий проекта, если тот же список должен применяться в CI. Отдельные замечания также можно подавить комментарием `analyzer-ignore: rule_id` в строке объявления или в предшествующей строке.
+
+## Пакеты для языковых экосистем
+
+В этом репозитории находятся весь движок, CLI, парсеры и веб-интерфейс. Отдельные проекты для популярных пакетных менеджеров предоставляют CLI-обёртки и дополнительные API для того же движка. Язык пакета не ограничивает список языков, которые может анализировать движок.
+
+| Репозиторий | Экосистема | Команда CLI |
+| --- | --- | --- |
+| [codefactor-app/php](https://github.com/codefactor-app/php) | PHP / Composer | `vendor/bin/codefactor` |
+| [codefactor-app/python](https://github.com/codefactor-app/python) | Python / pip | `codefactor`, `python -m codefactor` |
+| [codefactor-app/typescript](https://github.com/codefactor-app/typescript) | JavaScript и TypeScript / npm | `npx --no-install codefactor` |
+| [codefactor-app/rust](https://github.com/codefactor-app/rust) | Rust / Cargo | `codefactor`, `cargo codefactor` |
+
+Обёртки сохраняют аргументы CLI, рабочий каталог, стандартные потоки и код завершения. Через их API доступны анализ проекта, AST и графы. Информация о публикации и доступности установки пакетов — в соответствующих репозиториях; отдельный бинарник движка доступен в [релизах core](https://github.com/codefactor-app/core/releases).
+
+## Как это работает
+
+Codefactor находит исходные файлы, разбирает их с помощью Tree-sitter и приводит объявления разных языков к общему промежуточному представлению. Движок строит связи, вычисляет метрики и оценки сложности, применяет настроенные правила и предоставляет результаты через отчёты и локальный сервер. Метаданные проекта используются для определения связей без запуска пакетных менеджеров, скриптов сборки и анализируемого кода.
+
+| Исходники | Назначение |
+| --- | --- |
+| [analyzer-core](crates/analyzer-core/src) | Общая модель, поиск файлов, конфигурация, метрики, определение связей, графы, архитектура, оценки сложности и отчёты |
+| [analyzer-parser](crates/analyzer-parser/src) | Общие средства разбора с Tree-sitter и нормализации |
+| [Языковые крейты](crates) | Стратегии анализа PHP, Rust, Python, JavaScript и TypeScript |
+| [analyzer-cli](crates/analyzer-cli/src) | Команды CLI и локальный HTTP-сервер |
+| [Ресурсы веб-интерфейса](crates/analyzer-cli/web) | Встроенный браузерный интерфейс и модели графов |
+| [Сторонние грамматики](vendor) | Закреплённые версии грамматик PHP и TypeScript с информацией о происхождении и лицензиях |
+
+При определении связей проекта учитываются метаданные пакетов Node, сопоставления путей TypeScript/JavaScript, поддерживаемые метаданные Cargo и локальные зависимости. Ядро на Rust также предоставляет `LanguageStrategy` и реестры метрик для расширения анализа в приложениях, встраивающих движок.
+
+## Границы анализа
+
+Codefactor строит модель по доступным исходникам и метаданным. Диспетчеризация во время выполнения, рефлексия, метапрограммирование, неизвестные типы получателей и неподдерживаемые конструкции могут оставлять цели вызовов неопределёнными или неоднозначными. Раскрытие макросов, генерация кода и полное воспроизведение поведения компилятора и механизма разрешения зависимостей выходят за рамки поддерживаемой статической модели.
+
+Оценки сложности зависят от поддерживаемых конструкций и указанных допущений; они не заменяют измерения производительности. Структурное совпадение кода не доказывает семантическую эквивалентность, а экспериментальные замечания по проектированию требуют проверки человеком. Охват и диагностика описывают доступную модель, но не доказывают всё поведение программы во время выполнения. Перед выводами из отсутствия замечания или ребра графа проверьте диагностику разбора и определения связей.
+
+## Разработка и участие в проекте
+
+Приветствуются изменения в поддержке языков, определении связей, метриках, отчётах и интерфейсе. Для воспроизводимых ошибок и предложений используйте [issues](https://github.com/codefactor-app/core/issues), а для изменений — [pull requests](https://github.com/codefactor-app/core/pulls). Сообщая об ошибке анализа, приложите минимальный пример исходного кода, команду и конфигурацию, версию Codefactor, ожидаемый и фактический результат.
+
+Из каталога репозитория с исходниками запустите необходимые проверки:
 
 ```sh
 cargo fmt --all -- --check
@@ -70,8 +292,8 @@ cargo test --workspace --locked
 node --test crates/analyzer-cli/tests/*.cjs
 ```
 
-Node.js is needed for the web model tests. The CLI embeds web assets and does not require Node.js at runtime.
+Тесты на Rust проверяют движок, CLI и особенности анализа языков. Node.js используется для тестов моделей веб-интерфейса. В [каталоге тестов CLI](crates/analyzer-cli/tests) находятся интеграционные тесты и закреплённые наборы исходников для проверки определения целей вызовов; для сторонних тестовых исходников сохранены лицензии и сведения о происхождении. После изменения встроенных ресурсов веб-интерфейса пересоберите исполняемый файл.
 
-## License
+## Лицензия
 
-MIT. Vendored grammars and third-party test sources retain their own licenses and provenance records.
+Codefactor распространяется под [лицензией MIT](LICENSE). Для сторонних грамматик и тестовых исходников сохранены собственные лицензии и сведения о происхождении.
