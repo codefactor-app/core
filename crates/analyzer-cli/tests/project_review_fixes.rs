@@ -333,3 +333,116 @@ fn small_accumulation_preserves_both_branch_alternatives() {
     assert!(alternatives.iter().any(|path| path[0]["branch"] == "then"));
     assert!(alternatives.iter().any(|path| path[0]["branch"] == "else"));
 }
+
+#[test]
+fn typescript_declaration_files_are_not_analyzed_as_sources() {
+    use analyzer_core::LanguageStrategy;
+    use analyzer_typescript::TypeScript;
+    for (name, declaration) in [
+        ("a.d.ts", true),
+        ("a.d.mts", true),
+        ("a.d.cts", true),
+        ("styles.d.css.ts", true),
+        ("a.ts", false),
+        ("a.mts", false),
+        ("a.d.tsx", false),
+        ("d.ts", false),
+        ("a.dts", false),
+    ] {
+        assert_eq!(
+            TypeScript.is_declaration_file(std::path::Path::new(name)),
+            declaration,
+            "{name}"
+        );
+    }
+
+    let fixture = Fixture::new();
+    fixture.write(
+        "src/main.ts",
+        "export function run(id: number) { return id; }\n",
+    );
+    fixture.write(
+        "src/view.d.tsx",
+        "export function View() { return null; }\n",
+    );
+    fixture.write(
+        "src/types/api.d.ts",
+        "export declare function listUsers(a: string, b: string, c: string, d: string, e: string, f: string): void;\nexport declare class Client { get(p: string): Promise<unknown>; }\n",
+    );
+    fixture.write(
+        "src/env.d.mts",
+        "declare function env(name: string): string;\n",
+    );
+    fixture.write(
+        "src/legacy.d.cts",
+        "declare function legacy(): void;\nexport = legacy;\n",
+    );
+    fixture.write(
+        "src/styles.d.css.ts",
+        "declare const s: Record<string, string>;\nexport default s;\n",
+    );
+    fixture.write(
+        "node_modules/axios/index.d.ts",
+        "export declare function get(url: string): Promise<unknown>;\n",
+    );
+    let mut analyzer = fixture.analyzer();
+    analyzer.config.vendor.parse = analyzer_core::config::VendorParse::Full;
+    let report = analyzer.scan(&fixture.0).unwrap();
+    let files = report
+        .files
+        .iter()
+        .map(|f| f.path.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(files, ["src/main.ts", "src/view.d.tsx"]);
+    assert!(report.deferred_vendor.is_empty());
+    assert_eq!(report.summary.functions, 2);
+    let declaration = |path: &str| {
+        ["api.d", "env.d", "legacy.d", "styles.d", "axios"]
+            .iter()
+            .any(|stem| path.contains(stem))
+    };
+    assert!(report.metrics.iter().all(|m| !declaration(&m.path)));
+    assert!(report.violations.iter().all(|v| !declaration(&v.file)));
+    assert!(report.graph.nodes.iter().all(|n| !declaration(&n.id)));
+}
+
+#[test]
+fn lazy_vendor_declaration_files_still_link_typescript_callers() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "src/main.ts",
+        "import pad from 'leftpadx';\nexport function main() { return pad('a', 3); }\n",
+    );
+    fixture.write(
+        "node_modules/leftpadx/index.js",
+        "module.exports = function pad(s, n) { return s.padStart(n); };\n",
+    );
+    fixture.write(
+        "node_modules/leftpadx/index.d.ts",
+        "export default function pad(s: string, n: number): string;\n",
+    );
+    let analyzer = fixture.analyzer();
+    assert_eq!(
+        analyzer.config.vendor.parse,
+        analyzer_core::config::VendorParse::Lazy
+    );
+    let mut report = analyzer.scan(&fixture.0).unwrap();
+    assert!(report
+        .deferred_vendor
+        .iter()
+        .any(|d| d.path == "node_modules/leftpadx/index.d.ts" && d.language == "typescript"));
+    assert!(report.graph.edges.iter().any(|e| {
+        &*e.from == "fn:typescript:src/main.ts:src/main.main"
+            && &*e.to == "vendor:node_modules/leftpadx"
+    }));
+
+    analyzer
+        .expand_vendor(&fixture.0, &mut report, "node_modules/leftpadx")
+        .unwrap();
+    let files = report
+        .files
+        .iter()
+        .map(|f| f.path.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(files, ["node_modules/leftpadx/index.js", "src/main.ts"]);
+}

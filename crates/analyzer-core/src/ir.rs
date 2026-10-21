@@ -98,6 +98,10 @@ pub struct FileModel {
     pub browser_script: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub script_globals: Vec<ScriptGlobal>,
+    /// JS/TS module-scope `const` bindings with a declared or constructed type,
+    /// so importers can type `db.user.findMany()` on an exported client.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constants: Vec<Field>,
     #[serde(default)]
     pub types: Vec<TypeModel>,
     #[serde(default)]
@@ -171,11 +175,21 @@ pub enum TypeKind {
     Struct,
     Impl,
     Namespace,
+    /// Rust `type Item = ...;` binding inside an impl or trait body.
+    AssociatedType,
     Other,
 }
 impl Default for TypeKind {
     fn default() -> Self {
         Self::Other
+    }
+}
+impl TypeKind {
+    /// Impl blocks and module/namespace containers stay in the IR for method
+    /// ownership and module resolution, and associated types only bind a
+    /// trait's type member; none of them declares a type.
+    pub fn is_type_declaration(&self) -> bool {
+        !matches!(self, Self::Impl | Self::Namespace | Self::AssociatedType)
     }
 }
 

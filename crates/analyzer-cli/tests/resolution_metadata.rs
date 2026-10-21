@@ -219,6 +219,39 @@ fn package_main_exports_conditions_patterns_and_blocked_subpaths() {
         .any(|(name, _)| name.contains("wrong") || name == "node_modules/demo/private.work"));
 }
 #[test]
+fn installed_package_does_not_hide_builtin_external_operations() {
+    let f = Fixture::new();
+    f.write("app.ts", "import axios from 'axios'; import * as ns from 'axios'; import tr = require('axios'); function d(){axios.get();} function n(){ns.get();} function t(){tr.get();}");
+    f.write(
+        "web.js",
+        "const cj = require('axios'); function c(){cj.get();}",
+    );
+    f.write(
+        "node_modules/axios/package.json",
+        r#"{"main":"index.js","exports":{".":{"require":"./dist/axios.cjs","default":"./index.js"}}}"#,
+    );
+    f.write("node_modules/axios/index.js", "export default {};");
+    f.write("node_modules/axios/dist/axios.cjs", "module.exports = {};");
+    let mut deferred = config();
+    deferred.vendor.parse = Config::default().vendor.parse;
+    for config in [deferred, config()] {
+        let report = f.scan(config);
+        for caller in ["app.d", "app.n", "app.t", "web.c"] {
+            let targets = targets(&report, caller);
+            assert!(
+                targets.iter().any(|(name, _)| name == "http · axios · get"),
+                "{caller}: {targets:?}"
+            );
+            assert!(
+                !targets
+                    .iter()
+                    .any(|(name, _)| name.contains("<unresolved>")),
+                "{caller}: {targets:?}"
+            );
+        }
+    }
+}
+#[test]
 fn closest_manifest_is_authoritative_and_condition_key_order_is_preserved() {
     let f = Fixture::new();
     f.write(
@@ -378,6 +411,118 @@ fn rust_cfg_selects_local_declarations_inline_ancestors_and_conditional_paths() 
         .all(|node| node.label != "src::lib::tests::hidden"));
 }
 #[test]
+fn rust_test_only_items_are_excluded_from_metrics_unless_test_cfg_is_selected() {
+    let f = Fixture::new();
+    f.write("src/lib.rs", "pub struct Counter{value:u32}\nimpl Counter{pub fn new()->Self{Self{value:0}} pub fn inc(&mut self){self.value+=1;}}\n#[cfg(test)] fn helper()->Counter{Counter::new()}\n#[cfg(test)] impl Counter{fn peek(&self)->u32{self.value}}\n#[test] fn bare(){Counter::new();}\n#[tokio::test] async fn harness(){}\n#[cfg(not(test))] fn prod_only(){}\n#[cfg(any(test, feature=\"x\"))] fn shared(){}\n#[cfg(test)] mod tests{use super::*; struct H; impl H{fn make()->Counter{Counter::new()}} #[test] fn t(){H::make().inc();} mod nested{#[test] fn n(){}}}\n");
+    let metric = |report: &analyzer_core::AnalysisReport, id: &str, entity: &str| {
+        report
+            .metrics
+            .iter()
+            .find(|m| &*m.id == id && &*m.entity == entity)
+            .map(|m| m.value)
+    };
+    for cfg in [None, Some(vec![])] {
+        let mut config = config();
+        config.resolution.rust.cfg = cfg;
+        let report = f.scan(config);
+        assert_eq!(report.summary.functions, 4);
+        assert_eq!(
+            metric(&report, "functions_per_file", "src/lib.rs"),
+            Some(4.0)
+        );
+        assert_eq!(metric(&report, "types_per_file", "src/lib.rs"), Some(1.0));
+        assert_eq!(
+            metric(&report, "fan_in", "src::lib::Counter::new"),
+            Some(0.0)
+        );
+        for hidden in ["bare", "harness", "helper", "Counter::peek", "tests"] {
+            let hidden = format!("src::lib::{hidden}");
+            assert!(
+                report
+                    .metrics
+                    .iter()
+                    .all(|m| !m.entity.starts_with(&hidden)),
+                "{hidden}"
+            );
+            assert!(report
+                .graph
+                .nodes
+                .iter()
+                .all(|node| !node.label.starts_with(&hidden)));
+        }
+        assert!(report.files[0]
+            .imports
+            .iter()
+            .all(|import| !import.path.starts_with("super")));
+    }
+    let mut config = config();
+    config.resolution.rust.cfg = Some(vec!["test".into()]);
+    let report = f.scan(config);
+    assert_eq!(report.summary.functions, 11);
+    assert_eq!(
+        metric(&report, "fan_in", "src::lib::Counter::new"),
+        Some(3.0)
+    );
+}
+#[test]
+fn rust_out_of_line_test_modules_are_excluded_with_their_files() {
+    let f = Fixture::new();
+    f.write(
+        "Cargo.toml",
+        "[package]\nname='b'\nversion='0.1.0'\nedition='2021'\n",
+    );
+    f.write("src/lib.rs", "pub fn real()->u32{1}\npub fn caller()->u32{real()}\n#[cfg(test)]\nmod tests;\n#[cfg(test)]\nmod support;\n");
+    f.write("src/tests.rs", "use super::*;\nfn helper()->u32{real()+real()}\n#[test] fn it_works(){assert_eq!(helper(),2);}\n");
+    f.write(
+        "src/support/mod.rs",
+        "mod fixtures;\npub fn make()->u32{fixtures::one()}\n",
+    );
+    f.write(
+        "src/support/fixtures.rs",
+        "pub fn one()->u32{crate::real()}\n",
+    );
+    let paths = |report: &analyzer_core::AnalysisReport| {
+        report
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<Vec<_>>()
+    };
+    for cfg in [None, Some(vec![])] {
+        let mut config = config();
+        config.resolution.rust.cfg = cfg;
+        let report = f.scan(config);
+        assert_eq!(paths(&report), ["src/lib.rs"]);
+        assert_eq!(report.summary.functions, 2);
+        assert!(
+            report
+                .graph
+                .nodes
+                .iter()
+                .all(|node| node.file.as_deref() == Some("src/lib.rs")),
+            "{:?}",
+            report.graph.nodes
+        );
+        assert!(report
+            .metrics
+            .iter()
+            .all(|m| m.path.is_empty() || &*m.path == "src/lib.rs"));
+        assert!(report.files[0]
+            .types
+            .iter()
+            .all(|ty| !["tests", "support"].contains(&ty.name.as_str())));
+    }
+    let mut config = config();
+    config.resolution.rust.cfg = Some(vec!["test".into()]);
+    let report = f.scan(config);
+    assert_eq!(paths(&report).len(), 4);
+    assert!(report
+        .graph
+        .nodes
+        .iter()
+        .any(|node| node.label == "src::tests::helper"));
+}
+#[test]
 fn unknown_rust_condition_does_not_claim_certain_resolution() {
     let f = Fixture::new();
     f.write("src/lib.rs","#[cfg(feature=\"extra\")] fn maybe(){} fn run(){maybe();}\n#[cfg_attr(feature=\"extra\",path=\"other.rs\")] mod child; fn branch(){child::work();}");
@@ -496,6 +641,28 @@ fn cfg_truth_tables_unknowns_and_empty_inputs_are_explicit() {
         Some(false)
     );
     assert_eq!(evaluate_cfg("target_pointer_width=\"64\"", &cfg), None);
+}
+
+#[test]
+fn cfg_requires_test_only_for_predicates_false_without_test() {
+    use analyzer_core::resolution::cfg_requires_test;
+    for condition in [
+        "test",
+        "all(test, unix)",
+        "all(unix, test)",
+        "not(not(test))",
+    ] {
+        assert!(cfg_requires_test(condition), "{condition}");
+    }
+    for condition in [
+        "not(test)",
+        "any(test, feature = \"x\")",
+        "unix",
+        "any(not(test), feature = \"y\")",
+        "all(test",
+    ] {
+        assert!(!cfg_requires_test(condition), "{condition}");
+    }
 }
 
 #[test]
@@ -825,4 +992,37 @@ fn cargo_feature_metadata_changes_rebuild_cfg_selection_with_cached_source_ir() 
         vec![("src::lib::disabled".into(), Confidence::Resolved)]
     );
     assert_eq!(report.summary.cache_hits, report.files.len());
+}
+
+#[test]
+fn pkg_selector_matches_nearest_package_json_name() {
+    let f = Fixture::new();
+    f.write(
+        "package.json",
+        r#"{"name":"acme","private":true,"workspaces":["packages/*"]}"#,
+    );
+    f.write("packages/api/package.json", r#"{"name":"@acme/api"}"#);
+    f.write(
+        "packages/api/src/index.ts",
+        "import { load } from '../../db/src/store';\nexport function handle() { load(); }\n",
+    );
+    f.write("packages/db/package.json", r#"{"name":"@acme/db"}"#);
+    f.write("packages/db/src/store.ts", "export function load() {}\n");
+    f.write("tools/build.ts", "export function build() {}\n");
+    let report = f.scan(config());
+    let relations =
+        report
+            .graph
+            .relations(&["pkg:@acme/api".into()], &["pkg:@acme/db".into()], None);
+    let labels = |ids: &[String]| {
+        ids.iter()
+            .map(|id| report.graph.node(id).unwrap().label.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(labels(&relations.a), ["packages/api/src/index.handle"]);
+    assert_eq!(labels(&relations.b), ["packages/db/src/store.load"]);
+    assert_eq!(relations.a_to_b.len(), 1);
+    // The workspace root package owns only files outside member packages.
+    let root = report.graph.relations(&["pkg:acme".into()], &[], None);
+    assert_eq!(labels(&root.a), ["tools/build.build"]);
 }

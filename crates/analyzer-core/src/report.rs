@@ -171,6 +171,10 @@ pub fn scan_with_baseline(
     memory_trace("models");
     timings.mark("parse");
     let resolution = crate::resolution::ResolutionContext::load(scan_base, &analyzer.config);
+    let parsed_files = files.len() - cache_hits;
+    for path in strip_rust_test_modules(&mut files, &resolution, &analyzer.config) {
+        text_facts.remove(&path);
+    }
     let mut graph =
         CallGraph::build_with_context(&files, &analyzer.registry, &analyzer.config, &resolution);
     if !deferred_vendor.is_empty() {
@@ -200,8 +204,12 @@ pub fn scan_with_baseline(
     for file in &files {
         metrics.extend(metric_registry.calculate(file, &analyzer.config));
     }
-    let mut advanced =
-        crate::metrics::advanced_metrics_consuming_text_facts(&files, &graph, text_facts);
+    let mut advanced = crate::metrics::advanced_metrics_consuming_text_facts(
+        &files,
+        &graph,
+        &analyzer.config.architecture,
+        text_facts,
+    );
     metric_registry.intern_values(&mut advanced);
     metrics.extend(advanced);
     drop(metric_registry);
@@ -263,7 +271,12 @@ pub fn scan_with_baseline(
         types: files
             .iter()
             .filter(|f| !f.vendor)
-            .map(|f| f.types.len())
+            .map(|f| {
+                f.types
+                    .iter()
+                    .filter(|t| t.kind.is_type_declaration())
+                    .count()
+            })
             .sum(),
         architecture_warnings: architecture.warnings,
         warnings: violations
@@ -278,7 +291,7 @@ pub fn scan_with_baseline(
             + discovered.iter().filter(|f| f.deferred).count(),
         parse_errors: parse_errors.len(),
         cache_hits,
-        parsed_files: files.len() - cache_hits,
+        parsed_files,
     };
     log::info!(
         "scan completed files={} functions={} warnings={} errors={} cache_hits={}",
@@ -418,6 +431,7 @@ fn parse_one_with_architecture(
         let mut cached = cached;
         cached.path = f.relative.clone();
         cached.vendor = f.vendor;
+        strip_rust_test_items(&mut cached, &analyzer.config);
         return Ok((cached, source, true));
     }
     let relative = Path::new(&f.relative);
@@ -456,7 +470,92 @@ fn parse_one_with_architecture(
     if let Some(cache) = cache {
         let _ = cache.put(&hash, &model);
     }
+    strip_rust_test_items(&mut model, &analyzer.config);
     Ok((model, source, false))
+}
+
+/// Rust items compiled only for `cfg(test)` (inline `mod tests`, `#[test]`
+/// functions, test-only impls) are outside the analyzed build unless
+/// `resolution.rust.cfg` enables `test`. The cache keeps the physical model.
+/// Out-of-line `mod x;` declarations stay so `strip_rust_test_modules` can
+/// tell which files only test-only modules own.
+fn strip_rust_test_items(file: &mut FileModel, config: &crate::config::Config) {
+    if file.language != "rust" || rust_tests_enabled(config) {
+        return;
+    }
+    let ranges = file
+        .functions
+        .iter()
+        .filter(|f| test_only(&f.rust_cfg))
+        .map(|f| f.range.clone())
+        .chain(
+            file.types
+                .iter()
+                .filter(|t| test_only(&t.rust_cfg))
+                .map(|t| t.range.clone()),
+        )
+        .collect::<Vec<_>>();
+    if ranges.is_empty() {
+        return;
+    }
+    let inside = |r: &SourceRange| {
+        ranges.iter().any(|outer| {
+            (outer.start_line, outer.start_column) <= (r.start_line, r.start_column)
+                && (r.end_line, r.end_column) <= (outer.end_line, outer.end_column)
+        })
+    };
+    file.functions.retain(|f| !inside(&f.range));
+    file.types
+        .retain(|t| !inside(&t.range) || (t.kind == TypeKind::Namespace && t.external_module));
+    file.imports.retain(|i| !inside(&i.range));
+    if let Some(facts) = file.architecture_facts.as_mut() {
+        let facts = std::sync::Arc::make_mut(facts);
+        facts.functions.retain(|f| !inside(&f.range));
+        facts.fragments.retain(|f| !inside(&f.range));
+        facts.references.retain(|r| !inside(&r.range));
+        facts.value_accesses.retain(|a| !inside(&a.range));
+    }
+}
+
+fn rust_tests_enabled(config: &crate::config::Config) -> bool {
+    crate::resolution::evaluate_cfg("test", &config.resolution.rust) == Some(true)
+}
+
+fn test_only(conditions: &[String]) -> bool {
+    conditions
+        .iter()
+        .any(|condition| crate::resolution::cfg_requires_test(condition))
+}
+
+/// Drops test-only `mod x;` declarations and the files that only they own
+/// (`#[cfg(test)] mod tests;` with its body in `tests.rs`, and its children).
+/// Returns the dropped paths.
+fn strip_rust_test_modules(
+    files: &mut Vec<FileModel>,
+    resolution: &crate::resolution::ResolutionContext,
+    config: &crate::config::Config,
+) -> std::collections::BTreeSet<String> {
+    let test_module = |t: &TypeModel| {
+        t.kind == TypeKind::Namespace && t.external_module && test_only(&t.rust_cfg)
+    };
+    if rust_tests_enabled(config)
+        || !files
+            .iter()
+            .any(|f| f.language == "rust" && f.types.iter().any(test_module))
+    {
+        return Default::default();
+    }
+    let owned = crate::graph::owned_rust_files(files, resolution, config);
+    for file in files.iter_mut().filter(|f| f.language == "rust") {
+        file.types.retain(|t| !test_module(t));
+    }
+    let built = crate::graph::owned_rust_files(files, resolution, config);
+    let dropped = owned
+        .difference(&built)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    files.retain(|f| !dropped.contains(&f.path));
+    dropped
 }
 
 impl Analyzer {
@@ -474,6 +573,13 @@ impl Analyzer {
         let selected = discovered
             .into_iter()
             .filter(|f| f.vendor && f.vendor_package.as_deref() == Some(package))
+            // Deferred declaration files only link callers to the package.
+            .filter(|f| {
+                !self
+                    .registry
+                    .language_for_path(&f.absolute, &self.config.languages.extensions)
+                    .is_some_and(|s| s.is_declaration_file(&f.absolute))
+            })
             .collect::<Vec<_>>();
         let cache = if self.config.cache.enabled {
             let path = PathBuf::from(&self.config.cache.path);
@@ -541,7 +647,12 @@ impl Analyzer {
             .iter()
             .flat_map(|file| metric_registry.calculate(file, &self.config))
             .collect();
-        let mut advanced = crate::metrics::advanced_metrics(&report.files, &report.graph, &sources);
+        let mut advanced = crate::metrics::advanced_metrics(
+            &report.files,
+            &report.graph,
+            &sources,
+            &self.config.architecture,
+        );
         metric_registry.intern_values(&mut advanced);
         report.metrics.extend(advanced);
         report.aggregates = aggregates(

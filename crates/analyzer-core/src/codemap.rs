@@ -138,6 +138,8 @@ pub struct DependencyIndex {
     sets: Config,
     /// Each declaration has a physical identity, independent of Cargo compilation context.
     file_entities: HashMap<String, Vec<String>>,
+    /// Project package names per file for `pkg:` selectors.
+    source_packages: BTreeMap<String, Vec<String>>,
     views: std::sync::Mutex<std::collections::VecDeque<(String, std::sync::Arc<MapView>)>>,
 }
 fn entity_id(kind: &str, file: &str, name: &str) -> String {
@@ -203,6 +205,7 @@ impl DependencyIndex {
             witnesses: Vec::new(),
             sets: config.clone(),
             file_entities: HashMap::new(),
+            source_packages: report.graph.source_packages.clone(),
             views: std::sync::Mutex::new(std::collections::VecDeque::new()),
             coverage: Coverage {
                 files: report.files.iter().filter(|f| !f.vendor).count(),
@@ -645,7 +648,12 @@ impl DependencyIndex {
             argument: None,
             algorithmic_complexity: None,
         };
-        crate::graph::selector_matches(selector, &node)
+        let packages = e
+            .file
+            .as_ref()
+            .and_then(|file| self.source_packages.get(file))
+            .map_or(&[][..], Vec::as_slice);
+        crate::graph::selector_matches(selector, &node, packages)
     }
     pub fn cached_view(&self, options: &MapOptions) -> std::sync::Arc<MapView> {
         let key = format!(

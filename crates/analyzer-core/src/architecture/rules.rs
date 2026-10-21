@@ -3,10 +3,13 @@ use super::*;
 use crate::graph::{CallGraph, NodeKind};
 use sha2::{Digest, Sha256};
 
-fn module_key(file: &FileModel) -> String {
+pub(super) fn module_key(file: &FileModel) -> String {
     format!("{}:{}", file.language, file.module)
 }
-fn module_graph(deps: &[Dependency], symbols: &Symbols<'_>) -> BTreeMap<String, BTreeSet<String>> {
+pub(super) fn module_graph(
+    deps: &[Dependency],
+    symbols: &Symbols<'_>,
+) -> BTreeMap<String, BTreeSet<String>> {
     let keys = symbols
         .files
         .iter()
@@ -28,19 +31,21 @@ fn module_graph(deps: &[Dependency], symbols: &Symbols<'_>) -> BTreeMap<String, 
     }
     edges
 }
+/// Only operations on values establish a module cycle. The complete static
+/// dependency graph remains available to explicit boundaries and stability.
+pub(super) fn runtime_dependencies<'a>(deps: &[Dependency<'a>]) -> Vec<Dependency<'a>> {
+    deps.iter()
+        .filter(|d| matches!(d.kind, "call" | "member_access" | "variable_access"))
+        .cloned()
+        .collect()
+}
 pub(super) fn cycles(
     deps: &[Dependency],
     symbols: &Symbols<'_>,
     config: &ArchitectureConfig,
     out: &mut Vec<Violation>,
 ) {
-    // Only operations on values establish this rule's cycle. The complete static
-    // dependency graph remains available to explicit boundaries and stability.
-    let runtime = deps
-        .iter()
-        .filter(|d| matches!(d.kind, "call" | "member_access" | "variable_access"))
-        .cloned()
-        .collect::<Vec<_>>();
+    let runtime = runtime_dependencies(deps);
     let deps = runtime.as_slice();
     let edges = module_graph(deps, symbols);
     let keys = symbols
@@ -213,20 +218,20 @@ fn dependency_evidence(
 }
 pub(super) fn boundaries(
     deps: &[Dependency],
+    calls: &CallGraph,
     symbols: &Symbols<'_>,
     config: &ArchitectureConfig,
     diagnostics: &mut Vec<String>,
     out: &mut Vec<Violation>,
 ) {
+    let matches = |s: &str, f: &FileModel, e: &str| {
+        selector_matches(s, f, e, calls.packages_of(Some(&f.path)))
+    };
     let layer = |file: &FileModel, entity: &str| -> Option<String> {
         let matched = config
             .layers
             .iter()
-            .filter(|l| {
-                l.selectors
-                    .iter()
-                    .any(|s| selector_matches(s, file, entity))
-            })
+            .filter(|l| l.selectors.iter().any(|s| matches(s, file, entity)))
             .map(|l| l.name.clone())
             .collect::<Vec<_>>();
         (matched.len() == 1).then(|| matched[0].clone())
@@ -240,7 +245,7 @@ pub(super) fn boundaries(
             if config
                 .layers
                 .iter()
-                .filter(|l| l.selectors.iter().any(|s| selector_matches(s, f, e)))
+                .filter(|l| l.selectors.iter().any(|s| matches(s, f, e)))
                 .count()
                 > 1
             {
@@ -250,7 +255,7 @@ pub(super) fn boundaries(
         if config
             .composition_roots
             .iter()
-            .any(|s| selector_matches(s, a, &d.source_entity))
+            .any(|s| matches(s, a, &d.source_entity))
         {
             continue;
         }

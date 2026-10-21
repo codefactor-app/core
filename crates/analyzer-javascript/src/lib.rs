@@ -10,7 +10,7 @@ use std::path::Path;
 pub struct JavaScript;
 impl LanguageStrategy for JavaScript {
     fn version(&self) -> &'static str {
-        "11"
+        "12"
     }
     fn language_id(&self) -> &'static str {
         "javascript"
@@ -112,7 +112,7 @@ impl LanguageStrategy for JavaScript {
         catalog(&[
             ("db", "pg.*.query", "pg"),
             ("db", "mysql2.*.execute", "mysql2"),
-            ("db", "Prisma.*", "Prisma"),
+            ("db", "*@prisma/client.PrismaClient.*", "Prisma"),
             ("queue", "amqplib.*.publish", "amqplib"),
             ("shell", "child_process.execFile", "child_process"),
             ("shell", "child_process.exec", "child_process"),

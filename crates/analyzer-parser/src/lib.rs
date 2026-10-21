@@ -1091,6 +1091,17 @@ impl State<'_> {
         });
     }
     fn annotate_bindings(&mut self, root: Node<'_>) {
+        if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript) {
+            let type_index = TypeIndex::new(&self.model.types, self.dialect);
+            self.model.constants = bindings::module_constants(
+                root,
+                &type_index.scope(&self.model.module),
+                &self.model.imports,
+                self.dialect,
+                self.source,
+                self.path,
+            );
+        }
         // This pass only annotates executable call/property sites. A file with
         // none has no bindings to update, even when it declares nested helpers.
         if self.model.functions.iter().all(|function| {
@@ -1193,6 +1204,7 @@ impl State<'_> {
                     bindings::annotate(
                         node,
                         &mut self.model.functions[index],
+                        &self.model.constants,
                         &types,
                         import_list,
                         &nested,
@@ -1218,6 +1230,7 @@ impl State<'_> {
             bindings::annotate(
                 root,
                 &mut self.model.functions[index],
+                &self.model.constants,
                 &types,
                 import_list,
                 &nested,
@@ -1463,6 +1476,14 @@ impl State<'_> {
             "struct_item" => TypeKind::Struct,
             "impl_item" => TypeKind::Impl,
             "mod_item" | "internal_module" => TypeKind::Namespace,
+            "type_item"
+                if node
+                    .parent()
+                    .and_then(|body| body.parent())
+                    .is_some_and(|owner| matches!(owner.kind(), "impl_item" | "trait_item")) =>
+            {
+                TypeKind::AssociatedType
+            }
             _ => TypeKind::Other,
         };
         let mut typ = TypeModel {
@@ -1570,26 +1591,27 @@ impl State<'_> {
                 if let Some(params) = child(c, "parameters") {
                     let mut children_cursor = params.walk();
                     for p in params.named_children(&mut children_cursor) {
-                        let raw = snippet(p, self.source).trim();
-                        if p.kind() == "property_promotion_parameter"
-                            || ["private ", "public ", "protected ", "readonly "]
-                                .iter()
-                                .any(|prefix| raw.starts_with(prefix))
-                        {
-                            let name = text_field(p, "name", self.source)
-                                .or_else(|| {
-                                    first_kind(p, &["identifier", "variable_name"])
-                                        .map(|n| snippet(n, self.source).into())
-                                })
-                                .unwrap_or_default();
-                            let name = name.trim_start_matches('$').to_string();
-                            if !name.is_empty() && !typ.fields.iter().any(|f| f.name == name) {
+                        if let Some(name) = promoted_parameter_name(p, self.source) {
+                            if !typ.fields.iter().any(|f| f.name == name) {
+                                let modifier = child(p, "visibility")
+                                    .or_else(|| first_kind(p, &["accessibility_modifier"]));
+                                let readonly_type = php_readonly_promotion_type(p, self.source);
                                 typ.fields.push(Field {
                                     name,
-                                    type_name: text_field(p, "type", self.source)
+                                    type_name: readonly_type
+                                        .clone()
+                                        .or_else(|| text_field(p, "type", self.source))
+                                        .filter(|x| !x.is_empty())
                                         .map(|x| trim_type(&x)),
                                     range: range(p, self.path),
-                                    visibility: visibility(raw),
+                                    // A `readonly` promoted property without a
+                                    // modifier is public.
+                                    visibility: match readonly_type {
+                                        Some(_) => Some("public".into()),
+                                        None => {
+                                            visibility(snippet(modifier.unwrap_or(p), self.source))
+                                        }
+                                    },
                                     is_static: false,
                                     unknown_key: false,
                                     symbol_key_reference: None,
@@ -2157,6 +2179,21 @@ impl State<'_> {
             &receiver_names(&function, self.dialect),
             &mut fields,
         );
+        // A promoted constructor parameter is an implicit `$this->x = $x` /
+        // `this.x = x` on entry, so the constructor accesses that field.
+        if parent_type.is_some()
+            && parent_function.is_none()
+            && matches!(function.name.as_str(), "constructor" | "__construct")
+        {
+            if let Some(params) = params {
+                let mut children_cursor = params.walk();
+                fields.extend(
+                    params
+                        .named_children(&mut children_cursor)
+                        .filter_map(|p| promoted_parameter_name(p, self.source)),
+                );
+            }
+        }
         function.accessed_fields = fields.into_iter().collect();
         function.accessor = classify_accessor(body_node, &function, self.source, self.dialect);
         if parent_type.is_some() && parent_function.is_none() {
@@ -2695,6 +2732,15 @@ impl State<'_> {
                     ],
                 )
             });
+        // tree-sitter-typescript parses `await a.b<T>(x)` as a call whose function is
+        // `await a.b`; the awaited expression is the real callee.
+        let callee = callee.map(|n| {
+            if n.kind() == "await_expression" {
+                named_children(n).first().copied().unwrap_or(n)
+            } else {
+                n
+            }
+        });
         let target = callee
             .map(|n| snippet(n, self.source).trim())
             .unwrap_or_else(|| snippet(node, self.source).split('(').next().unwrap_or(""));
@@ -3381,6 +3427,60 @@ fn signature(node: Node<'_>, body: Option<Node<'_>>, src: &str) -> String {
     };
     raw.trim().chars().take(300).collect()
 }
+/// Name of a constructor parameter that also declares a property: PHP
+/// constructor promotion or a TypeScript parameter property (accessibility,
+/// `override` or `readonly` modifier, possibly after decorators).
+fn promoted_parameter_name(p: Node<'_>, source: &str) -> Option<String> {
+    let promoted = match p.kind() {
+        "property_promotion_parameter" => true,
+        "required_parameter" | "optional_parameter" => {
+            let mut cursor = p.walk();
+            let found = p.children(&mut cursor).any(|c| {
+                matches!(
+                    c.kind(),
+                    "accessibility_modifier" | "override_modifier" | "readonly"
+                )
+            });
+            found
+        }
+        "simple_parameter" => php_readonly_promotion_type(p, source).is_some(),
+        _ => false,
+    };
+    if !promoted {
+        return None;
+    }
+    let name = child(p, "name")
+        .or_else(|| child(p, "pattern").filter(|n| n.kind() == "identifier"))
+        .or_else(|| first_kind(p, &["identifier", "variable_name"]))?;
+    let name = snippet(name, source).trim_start_matches(['&', '$']);
+    (!name.is_empty()).then(|| name.to_string())
+}
+/// Declared type of a PHP `readonly` promoted parameter without a visibility
+/// modifier (`readonly Foo $x`). tree-sitter-php has no node for this form and
+/// recovers it as a `simple_parameter` whose type text starts with `readonly`
+/// (`readonly` as a type name followed by an ERROR node), or with an ERROR
+/// `readonly` node inside the parameter or right before it.
+fn php_readonly_promotion_type(p: Node<'_>, source: &str) -> Option<String> {
+    if p.kind() != "simple_parameter" {
+        return None;
+    }
+    let start = first_kind(p, &["attribute_list"]).map_or(p.start_byte(), |a| a.end_byte());
+    let head = source.get(start..child(p, "name")?.start_byte())?.trim();
+    if let Some(declared) = head
+        .get(..8)
+        .filter(|kw| kw.eq_ignore_ascii_case("readonly"))
+        .map(|_| &head[8..])
+        .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+    {
+        return Some(declared.trim().trim_end_matches('&').trim().to_string());
+    }
+    let is_readonly =
+        |n: Node<'_>| n.is_error() && snippet(n, source).eq_ignore_ascii_case("readonly");
+    let mut cursor = p.walk();
+    let error_inside = p.named_children(&mut cursor).any(is_readonly);
+    (error_inside || p.prev_named_sibling().is_some_and(is_readonly))
+        .then(|| text_field(p, "type", source).unwrap_or_default())
+}
 fn visibility(raw: &str) -> Option<String> {
     for v in ["private", "protected", "public"] {
         if raw.trim_start().starts_with(v) {
@@ -3486,7 +3586,12 @@ fn rust_conditions(node: Node<'_>, source: &str) -> Vec<String> {
             }
         }
         for attribute in attributes {
-            if let Some(condition) = attribute
+            // `#[test]` and harness attributes such as `#[tokio::test]` compile
+            // their item only in a `cfg(test)` build.
+            let path = attribute.split('(').next().unwrap_or(attribute).trim();
+            if path == "test" || path.ends_with("::test") {
+                conditions.push("test".to_owned());
+            } else if let Some(condition) = attribute
                 .strip_prefix("cfg")
                 .map(str::trim)
                 .and_then(|tail| tail.strip_prefix('('))

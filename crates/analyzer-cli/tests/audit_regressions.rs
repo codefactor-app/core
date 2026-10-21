@@ -1,4 +1,4 @@
-use analyzer_core::{Analyzer, Config, LanguageRegistry};
+use analyzer_core::{Analyzer, Config, LanguageRegistry, TypeKind};
 use serde_json::Value;
 use std::{
     path::PathBuf,
@@ -207,6 +207,41 @@ fn metric_filters_use_accessors_and_visibility_and_skip_nested_methods() {
         1.0,
         "only the public inherent method counts"
     );
+}
+
+#[test]
+fn types_per_file_counts_declared_types_not_impl_blocks_or_modules() {
+    let fixture = Fixture::new();
+    fixture.write("src/lib.rs", "pub mod worker;\npub struct S;\npub enum E { A }\npub trait T {}\npub type Alias = u32;\npub trait Source { type Out; type Def = u8; }\nimpl T for S {}\nimpl Iterator for S { type Item = u32; fn next(&mut self) -> Option<u32> { type Local = u32; None } }\nimpl S { fn new() -> Self { S } }\nmod helpers { pub struct Inner; }\n#[cfg(test)]\nmod tests {}\n");
+    fixture.write("src/worker.rs", "pub fn run() {}\n");
+    fixture.write("app.ts", "export class C {}\nexport interface I {}\nexport enum E { A }\nexport namespace N { export class Inner {} }\n");
+    let report = fixture
+        .analyzer(Config::default())
+        .scan(&fixture.0)
+        .unwrap();
+    let types = |path: &str| {
+        report
+            .metrics
+            .iter()
+            .find(|m| m.id.as_ref() == "types_per_file" && m.path.as_ref() == path)
+            .unwrap()
+            .value
+    };
+    assert_eq!(
+        types("src/lib.rs"),
+        7.0,
+        "S, E, T, Alias, Source, S::next::Local and helpers::Inner"
+    );
+    assert_eq!(types("src/worker.rs"), 0.0);
+    assert_eq!(types("app.ts"), 4.0, "C, I, E and N.Inner");
+    assert_eq!(report.summary.types, 11);
+    let lib = report.file("src/lib.rs").unwrap();
+    assert!(lib.types.iter().any(|t| t.kind == TypeKind::Impl));
+    assert!(lib.types.iter().any(|t| t.kind == TypeKind::Namespace));
+    assert!(lib
+        .types
+        .iter()
+        .any(|t| t.fqn.ends_with("S::Item") && t.kind == TypeKind::AssociatedType));
 }
 
 #[test]

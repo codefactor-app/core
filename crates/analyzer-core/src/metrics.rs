@@ -1,5 +1,6 @@
+use crate::architecture::ArchitectureConfig;
 use crate::config::Config;
-use crate::graph::{CallGraph, NodeKind};
+use crate::graph::CallGraph;
 use crate::ir::*;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -170,7 +171,12 @@ impl Metric for BuiltinMetric {
             .filter(|f| config.metrics.count_nested_functions || f.parent_function.is_none())
             .count();
         add("functions_per_file", "file", &file.path, 1, funcs);
-        add("types_per_file", "file", &file.path, 1, file.types.len());
+        let types = file
+            .types
+            .iter()
+            .filter(|t| t.kind.is_type_declaration())
+            .count();
+        add("types_per_file", "file", &file.path, 1, types);
         let mut method_counts = BTreeMap::<&str, usize>::new();
         for f in &file.functions {
             if f.is_module_initializer() || f.parent_function.is_some() {
@@ -456,8 +462,9 @@ pub fn advanced_metrics(
     files: &[FileModel],
     graph: &CallGraph,
     sources: &BTreeMap<String, String>,
+    architecture: &ArchitectureConfig,
 ) -> Vec<MetricValue> {
-    advanced_metrics_with_text_facts(files, graph, |file| {
+    advanced_metrics_with_text_facts(files, graph, architecture, |file| {
         FileTextFacts::new(
             file,
             sources.get(&file.path).map(String::as_str).unwrap_or(""),
@@ -468,9 +475,10 @@ pub fn advanced_metrics(
 pub(crate) fn advanced_metrics_consuming_text_facts(
     files: &[FileModel],
     graph: &CallGraph,
+    architecture: &ArchitectureConfig,
     mut facts: BTreeMap<String, FileTextFacts>,
 ) -> Vec<MetricValue> {
-    advanced_metrics_with_text_facts(files, graph, |file| {
+    advanced_metrics_with_text_facts(files, graph, architecture, |file| {
         facts
             .remove(&file.path)
             .expect("text facts for every parsed file")
@@ -480,6 +488,7 @@ pub(crate) fn advanced_metrics_consuming_text_facts(
 fn advanced_metrics_with_text_facts(
     files: &[FileModel],
     graph: &CallGraph,
+    architecture: &ArchitectureConfig,
     mut facts_for: impl FnMut(&FileModel) -> FileTextFacts,
 ) -> Vec<MetricValue> {
     let capacity = files
@@ -688,50 +697,11 @@ fn advanced_metrics_with_text_facts(
             });
         }
     }
-    let fallback_index = (!graph.node_index_is_current()).then(|| {
-        graph
-            .nodes
-            .iter()
-            .map(|node| (node.id.as_str(), node))
-            .collect::<BTreeMap<_, _>>()
-    });
-    let node = |id: &str| {
-        if let Some(index) = &fallback_index {
-            index.get(id).copied()
-        } else {
-            graph.node(id)
-        }
-    };
-    // Qualify module identities, while retaining real interop edges (e.g. JS→TS).
-    // Bare names can invent a cycle from unrelated calls in different languages.
-    let module_key =
-        |language: &str, module: &str| format!("{}:{language}{module}", language.len());
-    let mut module_edges = BTreeMap::<String, Vec<String>>::new();
-    let mut dependencies = HashSet::new();
-    for edge in &graph.edges {
-        let Some(from) = node(edge.from.as_ref()) else {
-            continue;
-        };
-        let Some(to) = node(edge.to.as_ref()) else {
-            continue;
-        };
-        if from.kind == NodeKind::Function && to.kind == NodeKind::Function {
-            if let (Some(a), Some(b)) = (&from.module, &to.module) {
-                let from = (from.language.as_deref().unwrap_or(""), a.as_str());
-                let to = (to.language.as_deref().unwrap_or(""), b.as_str());
-                if from != to && dependencies.insert((from, to)) {
-                    module_edges
-                        .entry(module_key(from.0, from.1))
-                        .or_default()
-                        .push(module_key(to.0, to.1));
-                }
-            }
-        }
-    }
-    drop(dependencies);
-    let cyclic = cyclic_modules(&module_edges);
+    // Same SCC and file scope as `arch_cycle`: resolved calls plus property,
+    // constant and variable access. Files in `architecture.exclude` report 0.
+    let cyclic = crate::architecture::cyclic_module_paths(files, graph, architecture);
     for file in files.iter().filter(|f| !f.vendor) {
-        let cycle = cyclic.contains(module_key(&file.language, &file.module).as_str());
+        let cycle = cyclic.contains(file.path.as_str());
         out.push(MetricValue {
             id: strings.intern("module_cycle"),
             scope: strings.intern("module"),
@@ -1012,26 +982,6 @@ fn halstead_volume(tokens: &[&str]) -> f64 {
     let unique = tokens.iter().copied().collect::<HashSet<_>>().len();
     tokens.len() as f64 * (unique.max(1) as f64).log2()
 }
-#[cfg(test)]
-fn module_reaches(starts: &[String], target: &str, edges: &BTreeMap<String, Vec<String>>) -> bool {
-    let mut queue = starts
-        .iter()
-        .cloned()
-        .collect::<std::collections::VecDeque<_>>();
-    let mut seen = std::collections::BTreeSet::new();
-    while let Some(node) = queue.pop_front() {
-        if node == target {
-            return true;
-        }
-        if !seen.insert(node.clone()) {
-            continue;
-        }
-        if let Some(next) = edges.get(&node) {
-            queue.extend(next.iter().cloned());
-        }
-    }
-    false
-}
 fn lcom4<'a>(
     methods: &[&'a FunctionModel],
     mut targets: impl FnMut(&'a FunctionModel) -> Vec<&'a str>,
@@ -1103,77 +1053,6 @@ fn lcom4_from_declared_targets(methods: &[&FunctionModel]) -> usize {
             .flat_map(|call| call.targets.iter().map(String::as_str))
             .collect()
     })
-}
-
-// Iterative Kosaraju: one O(V + E) traversal instead of a reachability search per module.
-fn cyclic_modules<K: AsRef<str> + Ord, V: AsRef<str>>(
-    edges: &BTreeMap<K, Vec<V>>,
-) -> std::collections::BTreeSet<&str> {
-    let names = edges
-        .iter()
-        .flat_map(|(a, bs)| std::iter::once(a.as_ref()).chain(bs.iter().map(AsRef::as_ref)))
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let ids = names
-        .iter()
-        .enumerate()
-        .map(|(i, &name)| (name, i))
-        .collect::<BTreeMap<_, _>>();
-    let mut forward = vec![Vec::new(); names.len()];
-    let mut reverse = vec![Vec::new(); names.len()];
-    for (a, bs) in edges {
-        let a = ids[a.as_ref()];
-        for b in bs {
-            let b = ids[b.as_ref()];
-            forward[a].push(b);
-            reverse[b].push(a);
-        }
-    }
-    let mut seen = vec![false; names.len()];
-    let mut order = Vec::with_capacity(names.len());
-    for start in 0..names.len() {
-        if seen[start] {
-            continue;
-        }
-        seen[start] = true;
-        let mut stack = vec![(start, 0)];
-        while let Some((node, next)) = stack.last_mut() {
-            if let Some(&target) = forward[*node].get(*next) {
-                *next += 1;
-                if !seen[target] {
-                    seen[target] = true;
-                    stack.push((target, 0));
-                }
-            } else {
-                order.push(*node);
-                stack.pop();
-            }
-        }
-    }
-    seen.fill(false);
-    let mut cyclic = std::collections::BTreeSet::new();
-    for start in order.into_iter().rev() {
-        if seen[start] {
-            continue;
-        }
-        seen[start] = true;
-        let mut stack = vec![start];
-        let mut component = Vec::new();
-        while let Some(node) = stack.pop() {
-            component.push(node);
-            for &target in &reverse[node] {
-                if !seen[target] {
-                    seen[target] = true;
-                    stack.push(target);
-                }
-            }
-        }
-        if component.len() > 1 || forward[start].contains(&start) {
-            cyclic.extend(component.into_iter().map(|i| names[i]));
-        }
-    }
-    cyclic
 }
 
 #[cfg(test)]
@@ -1249,8 +1128,9 @@ mod tests {
             .collect();
         files.sort_by(|a, b| a.path.cmp(&b.path));
         let graph = CallGraph::default();
-        let expected = advanced_metrics(&files, &graph, &sources);
-        let actual = advanced_metrics_consuming_text_facts(&files, &graph, facts);
+        let expected = advanced_metrics(&files, &graph, &sources, &Default::default());
+        let actual =
+            advanced_metrics_consuming_text_facts(&files, &graph, &Default::default(), facts);
         assert_eq!(
             serde_json::to_value(actual).unwrap(),
             serde_json::to_value(&expected).unwrap()
@@ -1262,31 +1142,6 @@ mod tests {
                 .count(),
             6
         );
-    }
-
-    #[test]
-    fn scc_cycle_detection_matches_reachability_on_generated_graphs() {
-        for seed in 0..64usize {
-            let mut edges = BTreeMap::new();
-            for a in 0..20usize {
-                let targets = (0..20usize)
-                    .filter(|b| (a * 37 + b * 17 + seed * 11) % 29 < 2)
-                    .map(|b| format!("module_{b}"))
-                    .collect::<Vec<_>>();
-                edges.insert(format!("module_{a}"), targets);
-            }
-            let cyclic = cyclic_modules(&edges);
-            for (name, targets) in &edges {
-                assert_eq!(
-                    cyclic.contains(name.as_str()),
-                    module_reaches(targets, name, &edges)
-                );
-            }
-        }
-        let chain: BTreeMap<String, Vec<String>> = (0..10_000)
-            .map(|i| (i.to_string(), vec![(i + 1).to_string()]))
-            .collect();
-        assert!(cyclic_modules(&chain).is_empty());
     }
 
     #[test]
@@ -1434,17 +1289,6 @@ mod tests {
     }
 
     #[test]
-    fn module_cycles_search_all_distinct_outgoing_branches() {
-        let edges = BTreeMap::from([
-            ("a".into(), vec!["leaf".into(), "b".into()]),
-            ("b".into(), vec!["c".into()]),
-            ("c".into(), vec!["a".into()]),
-        ]);
-        assert!(module_reaches(&edges["a"], "a", &edges));
-        assert!(!module_reaches(&["leaf".into()], "a", &edges));
-        assert!(!module_reaches(&["b".into()], "absent", &edges));
-    }
-    #[test]
     fn lcom4_uses_field_access_and_method_calls() {
         let a = FunctionModel {
             name: "a".into(),
@@ -1562,8 +1406,12 @@ mod tests {
                         .collect()
                 });
                 assert_eq!(expected, 2);
-                let metrics =
-                    advanced_metrics(std::slice::from_ref(&file), &graph, &BTreeMap::new());
+                let metrics = advanced_metrics(
+                    std::slice::from_ref(&file),
+                    &graph,
+                    &BTreeMap::new(),
+                    &Default::default(),
+                );
                 let actual = metrics.iter().find(|m| m.id.as_ref() == "lcom4").unwrap();
                 assert_eq!(
                     actual.value, expected as f64,
@@ -1601,31 +1449,26 @@ mod tests {
         graph.nodes = vec![make_node("a", "A"), make_node("b", "B")];
         graph.edges = vec![edge("a", "b"), edge("b", "a")];
         let compare = |graph: &CallGraph| {
-            let actual = advanced_metrics(&files, graph, &BTreeMap::new());
+            let actual = advanced_metrics(&files, graph, &BTreeMap::new(), &Default::default());
             let mut reindexed = graph.clone();
             reindexed.reindex();
-            let expected = advanced_metrics(&files, &reindexed, &BTreeMap::new());
+            let expected =
+                advanced_metrics(&files, &reindexed, &BTreeMap::new(), &Default::default());
             assert_eq!(
                 serde_json::to_value(actual).unwrap(),
                 serde_json::to_value(&expected).unwrap()
             );
         };
-        assert!(!graph.node_index_is_current());
         compare(&graph);
         graph.reindex();
-        assert!(graph.node_index_is_current());
         compare(&graph);
         graph.nodes.push(make_node("a", "C"));
-        assert!(!graph.node_index_is_current());
         compare(&graph);
         graph.reindex();
-        assert!(graph.node_index_is_current());
         compare(&graph);
         graph.nodes[0].id = "renamed".into();
-        assert!(!graph.node_index_is_current());
         compare(&graph);
         graph.nodes.clear();
-        assert!(!graph.node_index_is_current());
         compare(&graph);
     }
     #[test]

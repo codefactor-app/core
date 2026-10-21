@@ -1570,7 +1570,12 @@ fn malformed_function_ranges_do_not_panic_advanced_metrics() {
         ..Default::default()
     };
     let sources = std::collections::BTreeMap::from([("a.mini".into(), "a\nb\nc\n".into())]);
-    let metrics = analyzer_core::metrics::advanced_metrics(&[file], &Default::default(), &sources);
+    let metrics = analyzer_core::metrics::advanced_metrics(
+        &[file],
+        &Default::default(),
+        &sources,
+        &Default::default(),
+    );
     assert!(!metrics.is_empty());
 }
 

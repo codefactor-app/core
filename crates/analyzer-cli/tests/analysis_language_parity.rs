@@ -3,7 +3,10 @@ use analyzer_core::{
     metrics::{advanced_metrics, MetricValue},
     Config, FileModel, LanguageRegistry,
 };
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 fn registry() -> LanguageRegistry {
     let mut registry = LanguageRegistry::new();
@@ -16,6 +19,15 @@ fn registry() -> LanguageRegistry {
 }
 
 fn analyze(sources: &[(&str, &str)]) -> (Vec<FileModel>, Vec<MetricValue>) {
+    let (files, metrics) = analyze_recovering(sources);
+    for file in &files {
+        assert!(file.parse_errors.is_empty(), "{:?}", file.parse_errors);
+    }
+    (files, metrics)
+}
+
+/// Like `analyze`, for valid code that the grammar only parses with error recovery.
+fn analyze_recovering(sources: &[(&str, &str)]) -> (Vec<FileModel>, Vec<MetricValue>) {
     let registry = registry();
     let files = sources
         .iter()
@@ -24,9 +36,7 @@ fn analyze(sources: &[(&str, &str)]) -> (Vec<FileModel>, Vec<MetricValue>) {
             let strategy = registry
                 .by_extension(path.extension().unwrap().to_str().unwrap())
                 .unwrap();
-            let file = strategy.analyze(source, path);
-            assert!(file.parse_errors.is_empty(), "{:?}", file.parse_errors);
-            file
+            strategy.analyze(source, path)
         })
         .collect::<Vec<_>>();
     let graph = CallGraph::build(&files, &registry, &Config::default());
@@ -34,7 +44,7 @@ fn analyze(sources: &[(&str, &str)]) -> (Vec<FileModel>, Vec<MetricValue>) {
         .iter()
         .map(|(path, source)| (path.to_string(), source.to_string()))
         .collect::<BTreeMap<_, _>>();
-    let metrics = advanced_metrics(&files, &graph, &sources);
+    let metrics = advanced_metrics(&files, &graph, &sources, &Default::default());
     (files, metrics)
 }
 
@@ -200,6 +210,91 @@ fn real_module_cycle_scores_are_preserved_in_every_language() {
         }
     }
 }
+/// `module_cycle` reuses the `arch_cycle` graph: a property, constant or variable
+/// read closes a cycle like a call does, while an unresolved interface dispatch
+/// does not, so both report exactly the same modules.
+#[test]
+fn module_cycle_matches_arch_cycle_participants_in_every_language() {
+    let registry = registry();
+    for (expected, sources) in [
+        (3, vec![
+            ("app/a.py", "from app.b import step_b\nLIMIT = 3\ndef step_a(n):\n return step_b(n)\n"),
+            ("app/b.py", "from app.c import step_c\ndef step_b(n):\n return step_c(n)\n"),
+            ("app/c.py", "from app import a\ndef step_c(n):\n return n + a.LIMIT\n"),
+        ]),
+        (2, vec![
+            ("app/a.py", "from app.b import step_b\nLIMIT = 3\ndef step_a(n):\n return step_b(n)\n"),
+            ("app/b.py", "from app import a\ndef step_b(n):\n return min(n, a.LIMIT)\n"),
+        ]),
+        (3, vec![
+            ("src/a.ts", "import {stepB} from './b'; export const LIMIT = 3; export function stepA(n: number) { return stepB(n); }"),
+            ("src/b.ts", "import {stepC} from './c'; export function stepB(n: number) { return stepC(n); }"),
+            ("src/c.ts", "import {LIMIT} from './a'; export function stepC(n: number) { return Math.min(n, LIMIT); }"),
+        ]),
+        (3, vec![
+            ("src/a.js", "import {stepB} from './b.js'; export const LIMIT = 3; export function stepA(n) { return stepB(n); }"),
+            ("src/b.js", "import {stepC} from './c.js'; export function stepB(n) { return stepC(n); }"),
+            ("src/c.js", "import {LIMIT} from './a.js'; export function stepC(n) { return Math.min(n, LIMIT); }"),
+        ]),
+        (3, vec![
+            ("src/A.php", "<?php namespace App\\A; use App\\B\\B; class A { public const LIMIT = 3; public function step(B $b, int $n): int { return $b->step($n); } }"),
+            ("src/B.php", "<?php namespace App\\B; use App\\C\\C; class B { public function __construct(private C $c) {} public function step(int $n): int { return $this->c->step($n); } }"),
+            ("src/C.php", "<?php namespace App\\C; use App\\A\\A; class C { public function step(int $n): int { return min($n, A::LIMIT); } }"),
+        ]),
+        // A stub in an `architecture.exclude` path must not make `A::LIMIT`
+        // ambiguous for the metric only: both resolve over the same files.
+        (3, vec![
+            ("src/A.php", "<?php namespace App\\A; use App\\B\\B; class A { public const LIMIT = 3; public function step(B $b, int $n): int { return $b->step($n); } }"),
+            ("src/B.php", "<?php namespace App\\B; use App\\C\\C; class B { public function __construct(private C $c) {} public function step(int $n): int { return $this->c->step($n); } }"),
+            ("src/C.php", "<?php namespace App\\C; use App\\A\\A; class C { public function step(int $n): int { return min($n, A::LIMIT); } }"),
+            ("tests/fixtures/A.php", "<?php namespace App\\A; class A { public const LIMIT = 1; }"),
+        ]),
+        (3, vec![
+            ("src/lib.rs", "pub mod a; pub mod b; pub mod c;"),
+            ("src/a.rs", "pub const LIMIT: u32 = 3; pub fn step_a(n: u32) -> u32 { crate::b::step_b(n) }"),
+            ("src/b.rs", "pub fn step_b(n: u32) -> u32 { crate::c::step_c(n) }"),
+            ("src/c.rs", "use crate::a::LIMIT; pub fn step_c(n: u32) -> u32 { n.min(LIMIT) }"),
+        ]),
+        (0, vec![
+            ("src/A.php", "<?php namespace App\\A; use App\\B\\Port; class A { public function run(Port $p): int { return $p->go(); } public function back(): int { return 1; } }"),
+            ("src/B.php", "<?php namespace App\\B; use App\\A\\A; interface Port { public function go(): int; } class Impl implements Port { public function __construct(private A $a) {} public function go(): int { return $this->a->back(); } }"),
+        ]),
+    ] {
+        let files = sources
+            .iter()
+            .map(|(path, source)| {
+                let path = Path::new(path);
+                registry
+                    .by_extension(path.extension().unwrap().to_str().unwrap())
+                    .unwrap()
+                    .analyze_with_architecture(source, path, true)
+            })
+            .collect::<Vec<_>>();
+        let graph = CallGraph::build(&files, &registry, &Config::default());
+        let texts = sources
+            .iter()
+            .map(|(path, source)| (path.to_string(), source.to_string()))
+            .collect::<BTreeMap<_, _>>();
+        let architecture = analyzer_core::architecture::ArchitectureConfig::default();
+        let metrics = advanced_metrics(&files, &graph, &texts, &architecture);
+        let (_, issues) = analyzer_core::architecture::analyze(&files, &graph, &architecture);
+        let arch = issues
+            .iter()
+            .filter(|v| v.rule == "arch_cycle")
+            .flat_map(|v| v.architecture.as_ref().unwrap().participants.clone())
+            .collect::<BTreeSet<_>>();
+        let flagged = files
+            .iter()
+            .filter(|f| metric(&metrics, &f.path, "module_cycle") == 1.0)
+            .map(|f| format!("{}:{}", f.language, f.module))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(arch.len(), expected, "{}: {arch:?}", sources[0].0);
+        assert_eq!(flagged, arch, "{}", sources[0].0);
+        for (path, _) in sources.iter().filter(|(path, _)| path.starts_with("tests/")) {
+            assert_eq!(metric(&metrics, path, "module_cycle"), 0.0, "{path}");
+        }
+    }
+}
 
 #[test]
 fn php_absolute_function_names_resolve_without_namespace_or_variable_shadowing() {
@@ -307,4 +402,178 @@ class Static:
         static_lcom.value, 2.0,
         "a parameter named self is not an implicit receiver in a static method"
     );
+}
+
+#[test]
+fn constructor_promoted_properties_join_cohesion_like_assigned_fields() {
+    let (files, metrics) = analyze(&[
+        (
+            "promoted.php",
+            r#"<?php
+class Promoted {
+    public function __construct(private readonly Repo $repo, private Logger $log,) {}
+    public function a() { return $this->repo; }
+    public function b() { return $this->repo?->x(); }
+}
+class Classic {
+    private Repo $repo;
+    private Logger $log;
+    public function __construct(Repo $repo, Logger $log) { $this->repo = $repo; $this->log = $log; }
+    public function a() { return $this->repo; }
+    public function b() { return $this->repo?->x(); }
+}
+class MixedBody {
+    public function __construct(private Repo $repo, private Logger $log) { $this->repo->warm(); }
+    public function a() { return $this->repo; }
+    public function b() { return $this->repo; }
+}
+class Plain {
+    public function __construct(Repo $repo, Logger $log) {}
+    public function a() { return $this->repo; }
+    public function b() { return $this->repo; }
+}
+"#,
+        ),
+        (
+            "promoted.ts",
+            r#"declare function Inject(token: string): ParameterDecorator;
+class Repo { find() { return 1; } }
+export class Promoted {
+  constructor(private readonly repo: Repo, public log?: string) {}
+  a() { return this.repo; }
+  b() { return this.repo.find(); }
+}
+export class Decorated {
+  constructor(@Inject('R') private readonly repo: Repo, @Inject('L') protected log: string) {}
+  a() { return this.repo; }
+  b() { return this.repo.find(); }
+}
+class Base { constructor(readonly repo: Repo, readonly log: string) {} }
+export class Child extends Base {
+  constructor(override readonly repo: Repo, override readonly log: string) { super(repo, log); }
+  a() { return this.repo; }
+  b() { return this.repo.find(); }
+}
+export class Classic {
+  private repo: Repo;
+  private log: string;
+  constructor(repo: Repo, log: string) { this.repo = repo; this.log = log; }
+  a() { return this.repo; }
+  b() { return this.repo.find(); }
+}
+export class Plain {
+  constructor(repo: Repo, log: string) {}
+  a() { return (this as any).repo; }
+  b() { return (this as any).repo; }
+}
+"#,
+        ),
+        (
+            "promoted.js",
+            "class Plain { constructor(repo) {} a() { return this.repo } b() { return this.repo } }",
+        ),
+    ]);
+    let lcom4 = |fqn: &str| {
+        metrics
+            .iter()
+            .find(|metric| metric.entity.as_ref() == fqn && metric.id.as_ref() == "lcom4")
+            .unwrap_or_else(|| panic!("{fqn}"))
+            .value
+    };
+    for file in &files[..2] {
+        let constructor = if file.path.ends_with(".php") {
+            "__construct"
+        } else {
+            "constructor"
+        };
+        for ty in &file.types {
+            if !["Promoted", "Decorated", "Child", "Classic", "MixedBody"]
+                .contains(&ty.name.as_str())
+            {
+                continue;
+            }
+            assert_eq!(lcom4(&ty.fqn), 1.0, "{}", ty.fqn);
+            let mut names = ty
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>();
+            names.sort();
+            assert_eq!(names, ["log", "repo"], "{}", ty.fqn);
+            let init = file
+                .functions
+                .iter()
+                .find(|f| {
+                    f.parent_type.as_deref() == Some(ty.fqn.as_str()) && f.name == constructor
+                })
+                .unwrap();
+            assert_eq!(init.accessed_fields, ["log", "repo"], "{}", ty.fqn);
+        }
+    }
+    let php = &files[0];
+    let promoted = php.types.iter().find(|ty| ty.name == "Promoted").unwrap();
+    assert!(
+        promoted
+            .fields
+            .iter()
+            .all(|f| f.visibility.as_deref() == Some("private")),
+        "{:?}",
+        promoted.fields
+    );
+    for file in &files {
+        let plain = file.types.iter().find(|ty| ty.name == "Plain").unwrap();
+        assert!(plain.fields.is_empty(), "{:?}", plain.fields);
+        assert_eq!(lcom4(&plain.fqn), 2.0, "{}", plain.fqn);
+    }
+}
+
+#[test]
+fn php_readonly_promotion_without_visibility_is_a_public_field() {
+    // Valid since PHP 8.1, but tree-sitter-php has no node for `readonly Foo $x`
+    // without a visibility and recovers it as a plain parameter with ERROR nodes.
+    let (files, metrics) = analyze_recovering(&[(
+        "readonly.php",
+        r#"<?php
+class ReadonlyOnly {
+    public function __construct(
+        readonly Repo $repo,
+        #[\SensitiveParameter] readonly ?Logger $log,
+        READONLY \App\Clock &$clock,
+    ) {}
+    public function a() { return $this->repo; }
+    public function b() { return $this->repo?->x(); }
+}
+"#,
+    )]);
+    let ty = &files[0].types[0];
+    let fields = ty
+        .fields
+        .iter()
+        .map(|f| {
+            (
+                f.name.as_str(),
+                f.type_name.as_deref(),
+                f.visibility.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fields,
+        [
+            ("repo", Some("Repo"), Some("public")),
+            ("log", Some("Logger"), Some("public")),
+            ("clock", Some("App\\Clock"), Some("public")),
+        ]
+    );
+    let init = files[0]
+        .functions
+        .iter()
+        .find(|f| f.name == "__construct")
+        .unwrap();
+    assert_eq!(init.accessed_fields, ["clock", "log", "repo"]);
+    let lcom4 = metrics
+        .iter()
+        .find(|metric| metric.entity.as_ref() == ty.fqn && metric.id.as_ref() == "lcom4")
+        .unwrap();
+    assert_eq!(lcom4.value, 1.0);
 }

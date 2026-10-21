@@ -169,3 +169,20 @@ fn frozen_getopts_and_glob_element_receivers_are_resolved() {
         }
     }
 }
+
+#[test]
+fn test_harness_attributes_mark_items_test_only() {
+    let (file, _) = analyze("#[test] fn a(){ let f = || 1; f(); }\n#[tokio::test(flavor=\"multi_thread\")] async fn b(){}\n#[testing] fn c(){}\n#[test_case(1)] fn d(){}\n");
+    let cfg = |name: &str| {
+        file.functions
+            .iter()
+            .filter(|function| function.fqn.starts_with(&format!("src::lib::{name}")))
+            .map(|function| function.rust_cfg.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(cfg("a").len(), 2, "{:?}", file.functions);
+    assert!(cfg("a").iter().all(|conditions| conditions == &["test"]));
+    assert_eq!(cfg("b"), vec![vec!["test".to_owned()]]);
+    assert_eq!(cfg("c"), vec![Vec::<String>::new()]);
+    assert_eq!(cfg("d"), vec![Vec::<String>::new()]);
+}

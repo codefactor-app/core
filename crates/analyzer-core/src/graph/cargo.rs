@@ -17,6 +17,17 @@ fn ownership(
     index.all_rust_roots = all;
     index.with_files(files, resolution, config).rust_owners
 }
+/// Rust files reachable from some crate root through `mod` declarations,
+/// ignoring every cfg condition and disabled root.
+pub(crate) fn owned_rust_files(
+    files: &[FileModel],
+    resolution: &crate::resolution::ResolutionContext,
+    config: &Config,
+) -> BTreeSet<String> {
+    ownership(files, resolution, config, true)
+        .into_keys()
+        .collect()
+}
 fn remap(value: &mut String, old: &str, new: &str) {
     if value == old {
         *value = new.into();

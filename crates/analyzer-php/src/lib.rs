@@ -10,7 +10,7 @@ use std::path::Path;
 pub struct Php;
 impl LanguageStrategy for Php {
     fn version(&self) -> &'static str {
-        "14"
+        "16"
     }
     fn language_id(&self) -> &'static str {
         "php"

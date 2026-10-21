@@ -405,6 +405,30 @@ impl ResolutionContext {
         false
     }
 
+    /// Names a `pkg:` selector uses for a project file: its nearest Cargo package
+    /// or the `name` of its nearest package.json.
+    pub(crate) fn source_package_names(&self, path: &str, language: &str) -> Vec<String> {
+        match language {
+            "rust" => self.cargo_package_names(path),
+            "javascript" | "typescript" => {
+                let mut directory = Path::new(path).parent();
+                while let Some(parent) = directory {
+                    let key = parent.to_string_lossy().replace('\\', "/");
+                    if let Some(package) = self.packages.get(key.as_str()) {
+                        return package
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .map(|name| vec![name.to_owned()])
+                            .unwrap_or_default();
+                    }
+                    directory = parent.parent();
+                }
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
     pub fn package_present(&self, directory: &str) -> bool {
         self.packages.contains_key(directory)
     }
@@ -986,6 +1010,40 @@ pub fn module_path(namespace: &TypeModel, config: &RustResolutionConfig) -> Modu
         }
     }
     path.map(ModulePath::Path).unwrap_or(ModulePath::Default)
+}
+
+/// Whether a `cfg` predicate is false whenever `test` is, regardless of every
+/// other (unknown) flag, target or feature.
+pub fn cfg_requires_test(expression: &str) -> bool {
+    fn without_test(expression: &str, depth: usize) -> Option<bool> {
+        let expression = expression.trim();
+        if depth > 64 {
+            return None;
+        }
+        for operator in ["all", "any", "not"] {
+            if let Some(arguments) = expression
+                .strip_prefix(operator)
+                .map(str::trim_start)
+                .and_then(|tail| tail.strip_prefix('('))
+                .and_then(|tail| tail.strip_suffix(')'))
+            {
+                let values = split_arguments(arguments)
+                    .into_iter()
+                    .map(|argument| without_test(argument, depth + 1))
+                    .collect::<Vec<_>>();
+                return match operator {
+                    "all" if values.contains(&Some(false)) => Some(false),
+                    "all" if values.iter().all(|value| *value == Some(true)) => Some(true),
+                    "any" if values.contains(&Some(true)) => Some(true),
+                    "any" if values.iter().all(|value| *value == Some(false)) => Some(false),
+                    "not" if values.len() == 1 => values[0].map(|value| !value),
+                    _ => None,
+                };
+            }
+        }
+        (expression == "test").then_some(false)
+    }
+    without_test(expression, 0) == Some(false)
 }
 
 pub fn evaluate_cfg(expression: &str, config: &RustResolutionConfig) -> Option<bool> {

@@ -11,7 +11,12 @@ pub fn owner(file: &FileModel, f: &FunctionModel) -> Option<String> {
     if f.is_module_initializer() || f.parent_function.is_some() {
         return None;
     }
-    let eligible = |kind: &TypeKind| !matches!(kind, TypeKind::Namespace | TypeKind::Other);
+    let eligible = |kind: &TypeKind| {
+        !matches!(
+            kind,
+            TypeKind::Namespace | TypeKind::AssociatedType | TypeKind::Other
+        )
+    };
     if let Some(parent) = f.parent_type.as_ref() {
         if file
             .types

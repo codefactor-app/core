@@ -8,6 +8,11 @@ use std::sync::Arc;
 pub trait LanguageStrategy: Send + Sync {
     fn language_id(&self) -> &'static str;
     fn file_extensions(&self) -> &'static [&'static str];
+    /// Declaration-only inputs (for example TypeScript `.d.ts`) carry no
+    /// implementation. They are never parsed, so they produce no functions or metrics.
+    fn is_declaration_file(&self, _path: &Path) -> bool {
+        false
+    }
     fn parse(&self, source: &str, path: &Path) -> RawAst;
     fn normalize(&self, source: &str, path: &Path, ast: &RawAst) -> FileModel;
     /// Build structural IR for scans. Strategies may avoid allocating a detailed AST.

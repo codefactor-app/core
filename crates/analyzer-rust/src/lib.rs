@@ -10,7 +10,7 @@ use std::path::Path;
 pub struct Rust;
 impl LanguageStrategy for Rust {
     fn version(&self) -> &'static str {
-        "12"
+        "14"
     }
     fn language_id(&self) -> &'static str {
         "rust"

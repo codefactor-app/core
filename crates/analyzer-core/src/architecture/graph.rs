@@ -861,7 +861,8 @@ pub(super) fn witness(edges: &BTreeMap<String, BTreeSet<String>>, group: &[Strin
     }
     Vec::new()
 }
-pub(super) fn selector_matches(s: &str, f: &FileModel, entity: &str) -> bool {
+/// `packages` are the project package names owning `f` (see `pkg:`).
+pub(super) fn selector_matches(s: &str, f: &FileModel, entity: &str, packages: &[String]) -> bool {
     let Some((kind, value)) = s.split_once(':') else {
         return false;
     };
@@ -889,7 +890,8 @@ pub(super) fn selector_matches(s: &str, f: &FileModel, entity: &str) -> bool {
                     .iter()
                     .any(|fun| fun.fqn == entity && fun.parent_type.as_deref() == Some(value))
         }
-        "ns" | "pkg" | "mod" => prefix(&f.module) || prefix(entity),
+        "ns" | "mod" => prefix(&f.module) || prefix(entity),
+        "pkg" => prefix(&f.module) || prefix(entity) || packages.iter().any(|p| p == value),
         _ => false,
     }
 }

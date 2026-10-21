@@ -58,6 +58,13 @@ pub fn discover(root: &Path, config: &Config, registry: &LanguageRegistry) -> Ve
             continue;
         }
         let is_vendor = vendor.iter().any(|g| g.is_match(&relative));
+        let deferred = is_vendor && config.vendor.parse != VendorParse::Full;
+        // Declaration files are never parsed. Deferred vendor ones stay listed so
+        // TypeScript callers still link to their package; an explicitly requested
+        // file is still analyzed as given.
+        if strategy.is_declaration_file(path) && !deferred && path != root {
+            continue;
+        }
         let package = if is_vendor {
             Some(vendor_package(&relative))
         } else {
@@ -68,7 +75,7 @@ pub fn discover(root: &Path, config: &Config, registry: &LanguageRegistry) -> Ve
             relative,
             language: strategy.language_id().into(),
             vendor: is_vendor,
-            deferred: is_vendor && config.vendor.parse != VendorParse::Full,
+            deferred,
             vendor_package: package,
         });
     }
@@ -129,6 +136,9 @@ pub fn discover(root: &Path, config: &Config, registry: &LanguageRegistry) -> Ve
                 else {
                     continue;
                 };
+                if strategy.is_declaration_file(path) && config.vendor.parse == VendorParse::Full {
+                    continue;
+                }
                 if !config.languages.enabled.is_empty()
                     && !config
                         .languages

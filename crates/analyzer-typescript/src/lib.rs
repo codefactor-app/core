@@ -10,13 +10,25 @@ use std::path::Path;
 pub struct TypeScript;
 impl LanguageStrategy for TypeScript {
     fn version(&self) -> &'static str {
-        "12"
+        "14"
     }
     fn language_id(&self) -> &'static str {
         "typescript"
     }
     fn file_extensions(&self) -> &'static [&'static str] {
         &["ts", "tsx", "mts", "cts"]
+    }
+    /// Mirrors TypeScript's `isDeclarationFileName`: `.d.ts`, `.d.mts`, `.d.cts`
+    /// and the arbitrary-extension form `name.d.<ext>.ts`. `.d.tsx` is a source.
+    fn is_declaration_file(&self, path: &Path) -> bool {
+        let Some(name) = path.file_name().and_then(|x| x.to_str()) else {
+            return false;
+        };
+        let name = name.to_ascii_lowercase();
+        [".d.ts", ".d.mts", ".d.cts"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+            || (name.ends_with(".ts") && name.contains(".d."))
     }
     fn parse(&self, source: &str, path: &Path) -> RawAst {
         parse(
@@ -128,7 +140,7 @@ impl LanguageStrategy for TypeScript {
         catalog(&[
             ("db", "pg.*.query", "pg"),
             ("db", "mysql2.*.execute", "mysql2"),
-            ("db", "Prisma.*", "Prisma"),
+            ("db", "*@prisma/client.PrismaClient.*", "Prisma"),
             ("queue", "amqplib.*.publish", "amqplib"),
             ("shell", "child_process.execFile", "child_process"),
             ("shell", "child_process.exec", "child_process"),

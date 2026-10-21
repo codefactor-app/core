@@ -251,6 +251,76 @@ fn imported_python_class_is_identified_from_its_declaration() {
     assert!(linked(&graph, "flow.flow", "dep.Client.run"), "{graph:?}");
 }
 #[test]
+fn default_require_and_namespace_package_imports_match_the_builtin_catalog() {
+    for (strategy, path, extra) in [
+        (
+            Box::new(analyzer_javascript::JavaScript) as Box<dyn LanguageStrategy>,
+            "app.js",
+            "",
+        ),
+        (
+            Box::new(analyzer_typescript::TypeScript),
+            "app.ts",
+            "import tr = require('axios'); function t(){tr.get();}",
+        ),
+    ] {
+        let source = format!(
+            "import axios from 'axios'; import http from 'axios'; import ax2, {{get as g}} from 'axios'; \
+             import * as ns from 'axios'; const cj = require('axios'); \
+             function d(){{axios.get();}} function a(){{http.get();}} function m(){{ax2.get();}} \
+             function n(){{ns.get();}} function c(){{cj.get();}} function r(){{g();}} {extra}"
+        );
+        let files = models(&*strategy, &[(path, &source)]);
+        let graph = CallGraph::build(&files, &registry(), &Config::default());
+        let callers = if extra.is_empty() {
+            &["d", "a", "m", "n", "c", "r"][..]
+        } else {
+            &["d", "a", "m", "n", "c", "r", "t"][..]
+        };
+        for caller in callers {
+            let targets = graph
+                .edges
+                .iter()
+                .filter(|e| e.from.ends_with(&format!("app.{caller}")))
+                .map(|e| &*e.to)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                targets,
+                ["external:http:axios:get"],
+                "{path} {caller}: {graph:?}"
+            );
+        }
+    }
+}
+#[test]
+fn awaited_generic_package_calls_match_the_builtin_catalog() {
+    for path in ["app.ts", "app.tsx"] {
+        let files = models(
+            &analyzer_typescript::TypeScript,
+            &[(
+                path,
+                "import axios from 'axios'; interface User { id: number } \
+                 async function a(u: string) { const r = await axios.get<User>(u); return r.data; } \
+                 async function b(u: string) { return (await axios.get<User>(u)).data; }",
+            )],
+        );
+        let graph = CallGraph::build(&files, &registry(), &Config::default());
+        for caller in ["a", "b"] {
+            let targets = graph
+                .edges
+                .iter()
+                .filter(|e| e.from.ends_with(&format!("app.{caller}")))
+                .map(|e| &*e.to)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                targets,
+                ["external:http:axios:get"],
+                "{path} {caller}: {graph:?}"
+            );
+        }
+    }
+}
+#[test]
 fn shadowed_import_names_do_not_create_project_or_external_edges() {
     let cases: Vec<(Box<dyn LanguageStrategy>, &str, &str)> = vec![
         (
@@ -262,6 +332,16 @@ fn shadowed_import_names_do_not_create_project_or_external_edges() {
             Box::new(analyzer_javascript::JavaScript),
             "scope.js",
             "import * as axios from 'axios'; function flow(axios){axios.get();}",
+        ),
+        (
+            Box::new(analyzer_javascript::JavaScript),
+            "default.js",
+            "import axios from 'axios'; function flow(axios){axios.get();}",
+        ),
+        (
+            Box::new(analyzer_typescript::TypeScript),
+            "default.ts",
+            "import axios from 'axios'; function flow(){let axios={get(){}};axios.get();}",
         ),
         (
             Box::new(analyzer_typescript::TypeScript),
@@ -459,6 +539,21 @@ fn a_project_import_alias_is_not_a_library_operation() {
             "{path}: {graph:?}"
         );
         assert!(!graph.edges.iter().any(|e| e.to.starts_with("external:")));
+        let files = models(
+            &*strategy,
+            &[
+                ("local.js", "export default {get(){}}"),
+                (
+                    path,
+                    "import axios from './local';function flow(){axios.get();}",
+                ),
+            ],
+        );
+        let graph = CallGraph::build(&files, &registry(), &Config::default());
+        assert!(
+            !graph.edges.iter().any(|e| e.to.starts_with("external:")),
+            "{path}: {graph:?}"
+        );
     }
 }
 
@@ -757,4 +852,295 @@ fn nested_block_restoration_keeps_assignments_and_branch_uncertainty() {
             assert!(calls[9].binding_unknown, "{path}");
         }
     }
+}
+
+#[test]
+fn chained_members_of_an_external_receiver_match_external_rules() {
+    use analyzer_core::ExternalOperationRule;
+    let rule = |pattern: &str, library: &str| ExternalOperationRule {
+        category: "db".into(),
+        pattern: pattern.into(),
+        library: library.into(),
+        operation: "op".into(),
+    };
+    let mut config = Config::default();
+    config.external.rules = vec![
+        rule("@prisma/client.PrismaClient.*.findMany", "prisma"),
+        rule("openai.OpenAI.*.create", "openai"),
+        rule("Stripe\\StripeClient.*.create", "stripe"),
+    ];
+    let cases: Vec<(Box<dyn LanguageStrategy>, &str, &str)> = vec![
+        (Box::new(analyzer_typescript::TypeScript), "repo.ts",
+         "import { PrismaClient } from '@prisma/client';\
+          export function param(db: PrismaClient){ return db.user.findMany(); }\
+          export function local(){ const c = new PrismaClient(); return c.user.findMany(); }\
+          export class Repo { constructor(private readonly db: PrismaClient){} all(){ return this.db.user.findMany(); } }"),
+        (Box::new(analyzer_javascript::JavaScript), "repo.js",
+         "import { PrismaClient } from '@prisma/client';\
+          export function local(){ const c = new PrismaClient(); return c.user.findMany(); }"),
+        (Box::new(analyzer_python::Python), "llm.py",
+         "from openai import OpenAI\ndef param(client: OpenAI):\n    return client.chat.completions.create()\n"),
+        (Box::new(analyzer_php::Php), "Pay.php",
+         "<?php namespace App; use Stripe\\StripeClient;\
+          final class Pay { public function __construct(private StripeClient $stripe) {}\
+          public function charge(): void { $this->stripe->customers->create([]); }\
+          public function local(): void { $s = new StripeClient('k'); $s->customers->create([]); } }"),
+    ];
+    for (strategy, path, source) in cases {
+        let files = models(&*strategy, &[(path, source)]);
+        let graph = CallGraph::build(&files, &registry(), &config);
+        let chained = graph
+            .edges
+            .iter()
+            .filter(|e| e.to.starts_with("external:db:"))
+            .count();
+        let expected = match path {
+            "repo.ts" => 3,
+            "Pay.php" => 2,
+            _ => 1,
+        };
+        assert_eq!(chained, expected, "{path}: {graph:?}");
+        // The member path stays under the imported identity, never a
+        // namespace-relative or function-local name.
+        assert!(
+            !graph.edges.iter().any(|e| e.to.contains("App\\Stripe")),
+            "{path}: {graph:?}"
+        );
+    }
+    // Inside a regular package the library import stays top-level.
+    let files = models(
+        &analyzer_python::Python,
+        &[
+            ("svc/__init__.py", ""),
+            (
+                "svc/llm.py",
+                "from openai import OpenAI\ndef param(client: OpenAI):\n    return client.chat.completions.create()\nclass Llm:\n    def __init__(self, client: OpenAI):\n        self.client = client\n    def ask(self):\n        return self.client.chat.completions.create()\n",
+            ),
+        ],
+    );
+    let graph = CallGraph::build(&files, &registry(), &config);
+    for from in ["svc.llm.param", "svc.llm.Llm.ask"] {
+        assert!(
+            linked(&graph, from, "external:db:openai:op"),
+            "{from}: {graph:?}"
+        );
+    }
+    // A project type without the field metadata is not an external owner.
+    let files = models(
+        &analyzer_typescript::TypeScript,
+        &[(
+            "local.ts",
+            "class PrismaClient { }\
+             export function f(db: PrismaClient){ return db.user.findMany(); }",
+        )],
+    );
+    let mut config = Config::default();
+    config.external.rules = vec![rule("*PrismaClient*", "prisma")];
+    let graph = CallGraph::build(&files, &registry(), &config);
+    assert!(
+        !graph.edges.iter().any(|e| e.to.starts_with("external:")),
+        "{graph:?}"
+    );
+}
+
+#[test]
+fn the_builtin_prisma_entry_matches_client_model_calls() {
+    for (strategy, path) in [
+        (
+            Box::new(analyzer_javascript::JavaScript) as Box<dyn LanguageStrategy>,
+            "repo.js",
+        ),
+        (Box::new(analyzer_typescript::TypeScript), "repo.ts"),
+    ] {
+        let files = models(
+            &*strategy,
+            &[(
+                path,
+                "import { PrismaClient } from '@prisma/client';\
+                 export function flow(){ const c = new PrismaClient(); c.user.findMany(); c.$connect(); }",
+            )],
+        );
+        let graph = CallGraph::build(&files, &registry(), &Config::default());
+        assert_eq!(
+            graph
+                .edges
+                .iter()
+                .filter(|e| e.to.starts_with("external:db:Prisma:"))
+                .count(),
+            2,
+            "{path}: {graph:?}"
+        );
+    }
+}
+
+#[test]
+fn python_absolute_imports_inside_packages_stay_top_level() {
+    let files = models(
+        &analyzer_python::Python,
+        &[
+            ("svc/__init__.py", ""),
+            ("svc/logging.py", "def info(): pass\n"),
+            ("svc/sibling.py", "def work(): pass\n"),
+            (
+                "svc/client.py",
+                "import requests\nimport logging\nfrom requests import post\nfrom svc.sibling import work\nfrom . import sibling\ndef fetch(url):\n requests.get(url)\n post(url)\n logging.info()\n work()\n sibling.work()\n",
+            ),
+            ("app/__init__.py", ""),
+            ("app/scripts/helpers.py", "def tool(): pass\n"),
+            (
+                "app/scripts/run.py",
+                "import requests\nimport helpers\ndef main():\n requests.get()\n helpers.tool()\n",
+            ),
+        ],
+    );
+    let graph = CallGraph::build(&files, &registry(), &Config::default());
+    assert!(
+        linked(&graph, "svc.client.fetch", "external:http:requests:get"),
+        "{graph:?}"
+    );
+    assert!(
+        linked(&graph, "svc.client.fetch", "external:http:requests:post"),
+        "{graph:?}"
+    );
+    assert!(
+        !linked(&graph, "svc.client.fetch", "svc.logging.info"),
+        "{graph:?}"
+    );
+    assert!(
+        linked(&graph, "svc.client.fetch", "svc.sibling.work"),
+        "{graph:?}"
+    );
+    assert!(
+        graph
+            .edges
+            .iter()
+            .all(|e| !e.to.contains("svc.requests") && !e.to.contains("app.scripts.requests")),
+        "{graph:?}"
+    );
+    assert!(
+        linked(&graph, "app.scripts.run.main", "external:http:requests:get"),
+        "{graph:?}"
+    );
+    assert!(
+        linked(&graph, "app.scripts.run.main", "app.scripts.helpers.tool"),
+        "{graph:?}"
+    );
+}
+
+#[test]
+fn module_constant_clients_and_library_subclasses_match_chained_prisma_calls() {
+    let files = models(
+        &analyzer_typescript::TypeScript,
+        &[
+            (
+                "src/lib/prisma.ts",
+                "import { PrismaClient } from '@prisma/client';\
+                 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };\
+                 export const prisma = globalForPrisma.prisma ?? new PrismaClient();\
+                 export const typed: PrismaClient = globalForPrisma.prisma || new PrismaClient();\
+                 export let mutable = new PrismaClient();\
+                 export function sameFile() { return prisma.user.findMany(); }",
+            ),
+            ("src/db/index.ts", "export * from '../lib/prisma';"),
+            (
+                "src/db/store.ts",
+                "export class Store { save(): void {} }\
+                 export const store = new Store();",
+            ),
+            (
+                "src/app/users.ts",
+                "import { prisma, mutable } from '../db';\
+                 import { typed } from '../lib/prisma';\
+                 import { store } from '../db/store';\
+                 export function barrel() { return prisma.user.findMany(); }\
+                 export function direct() { return typed.$connect(); }\
+                 export function reassignable() { return mutable.user.findMany(); }\
+                 export function shadowed(prisma: { user: { findMany(): void } }) { return prisma.user.findMany(); }\
+                 export function project() { store.save(); }",
+            ),
+            (
+                "src/nest/prisma.service.ts",
+                "import { PrismaClient } from '@prisma/client';\
+                 export class PrismaService extends PrismaClient {\
+                   async onModuleInit() { await this.$connect(); }\
+                   async $disconnect() {}\
+                   close() { return this.$disconnect(); }\
+                 }",
+            ),
+            (
+                "src/nest/users.service.ts",
+                "import { PrismaService } from './prisma.service';\
+                 export class UsersService {\
+                   constructor(private readonly prisma: PrismaService) {}\
+                   findAll() { return this.prisma.user.findMany(); }\
+                 }",
+            ),
+        ],
+    );
+    let graph = CallGraph::build(&files, &registry(), &Config::default());
+    for from in [
+        "src/lib/prisma.sameFile",
+        "src/app/users.barrel",
+        "src/app/users.direct",
+        "src/nest/prisma.service.PrismaService.onModuleInit",
+        "src/nest/users.service.UsersService.findAll",
+    ] {
+        assert!(
+            linked(&graph, from, "external:db:Prisma:*"),
+            "{from}: {graph:?}"
+        );
+    }
+    // A `let` can be reassigned, a parameter shadows the import, and a
+    // project override is not the library method.
+    for from in [
+        "src/app/users.reassignable",
+        "src/app/users.shadowed",
+        "src/nest/prisma.service.PrismaService.close",
+    ] {
+        assert!(
+            !linked(&graph, from, "external:db:Prisma:*"),
+            "{from}: {graph:?}"
+        );
+    }
+    assert!(
+        linked(
+            &graph,
+            "src/nest/prisma.service.PrismaService.close",
+            "PrismaService.$disconnect"
+        ),
+        "{graph:?}"
+    );
+    assert!(
+        linked(&graph, "src/app/users.project", "src/db/store.Store.save"),
+        "{graph:?}"
+    );
+}
+
+#[test]
+fn python_scripts_inside_packages_still_import_sibling_modules() {
+    let files = models(
+        &analyzer_python::Python,
+        &[
+            ("app/__init__.py", ""),
+            ("app/utils.py", "def helper(): pass\n"),
+            ("app/config.py", "class Settings:\n def load(self): pass\n"),
+            (
+                "app/main.py",
+                "import utils\nimport requests\nfrom config import Settings\ndef run():\n utils.helper()\n s = Settings()\n s.load()\n requests.get()\n",
+            ),
+        ],
+    );
+    let graph = CallGraph::build(&files, &registry(), &Config::default());
+    assert!(
+        linked(&graph, "app.main.run", "app.utils.helper"),
+        "{graph:?}"
+    );
+    assert!(
+        linked(&graph, "app.main.run", "app.config.Settings.load"),
+        "{graph:?}"
+    );
+    assert!(
+        linked(&graph, "app.main.run", "external:http:requests:get"),
+        "{graph:?}"
+    );
 }

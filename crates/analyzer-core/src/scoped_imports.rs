@@ -59,14 +59,22 @@ pub struct ImportScope<'a, 'imports> {
     range: &'a SourceRange,
 }
 impl ImportScope<'_, '_> {
-    pub fn get(&self, name: &str) -> Option<&String> {
+    fn entry(&self, name: &str) -> Option<&Entry<'_>> {
         self.index
             .aliases
             .get(name)?
             .iter()
             .rev()
             .find(|e| applies(e.import, self.range))
-            .map(|e| &e.value)
+    }
+
+    pub fn get(&self, name: &str) -> Option<&String> {
+        self.entry(name).map(|e| &e.value)
+    }
+
+    /// The declaration behind `get`, for callers that need its original specifier.
+    pub fn import(&self, name: &str) -> Option<&Import> {
+        self.entry(name).map(|e| e.import)
     }
 
     pub fn contains_key(&self, name: &str) -> bool {

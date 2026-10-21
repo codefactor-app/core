@@ -429,6 +429,21 @@ impl ResolutionContext {
             directory = parent(&directory);
         }
     }
+    /// Names that select the owning Cargo package of a source file: the package
+    /// name, its `-`/`_` spelling and the library crate name.
+    pub(crate) fn cargo_package_names(&self, file: &str) -> Vec<String> {
+        let Some((_, package)) = self.cargo_package(file) else {
+            return Vec::new();
+        };
+        let mut names = vec![
+            package.name.clone(),
+            package.name.replace('-', "_"),
+            package.library_name.clone(),
+        ];
+        names.sort();
+        names.dedup();
+        names
+    }
     /// Cargo crate bindings select an analyzed local library, never a package basename.
     pub(crate) fn rust_dependency_roots(
         &self,

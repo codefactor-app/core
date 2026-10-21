@@ -6,6 +6,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 mod cargo;
+pub(crate) use cargo::owned_rust_files;
 mod inheritance;
 mod properties;
 
@@ -107,6 +108,9 @@ pub struct CallGraph {
     incoming: HashMap<Arc<str>, Vec<usize>>,
     #[serde(skip)]
     by_id: HashMap<String, usize>,
+    /// Package names owning each project file, matched by `pkg:` selectors.
+    #[serde(skip)]
+    pub(crate) source_packages: BTreeMap<String, Vec<String>>,
 }
 impl<'de> Deserialize<'de> for CallGraph {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -1524,12 +1528,31 @@ impl CallGraph {
                     .any(|target| blocked_script_targets.contains(target)))
             .then(|| targets.iter().next().unwrap().clone())
         };
-        let mut graph = Self::default();
+        let mut graph = Self {
+            source_packages: files
+                .iter()
+                .filter(|file| !file.vendor)
+                .map(|file| {
+                    (
+                        file.path.clone(),
+                        context.source_package_names(&file.path, &file.language),
+                    )
+                })
+                .filter(|(_, names)| !names.is_empty())
+                .collect(),
+            ..Self::default()
+        };
         let mut edge_ids = BTreeMap::<String, Arc<str>>::new();
         let mut functions = BTreeMap::<&str, BTreeMap<String, Vec<(String, String)>>>::new();
         let project_modules = files
             .iter()
             .map(|f| (f.language.as_str(), f.module.as_str()))
+            .collect::<BTreeSet<_>>();
+        // JS/TS imports resolving here are project code, never a library package.
+        let source_modules = files
+            .iter()
+            .filter(|f| !f.vendor && matches!(f.language.as_str(), "javascript" | "typescript"))
+            .flat_map(|f| [f.module.as_str(), f.path.as_str()])
             .collect::<BTreeSet<_>>();
         let modules = files
             .iter()
@@ -1597,6 +1620,7 @@ impl CallGraph {
             }))
             .collect::<BTreeSet<_>>();
         let mut parents = BTreeMap::<&str, BTreeMap<&str, Vec<String>>>::new();
+        let mut external_bases = ExternalBases::default();
         for file in files {
             for t in &file.types {
                 for base in &t.extends {
@@ -1613,6 +1637,37 @@ impl CallGraph {
                             .entry(t.fqn.as_str())
                             .or_default()
                             .push(resolved);
+                    } else if matches!(file.language.as_str(), "javascript" | "typescript")
+                        && resolved != *base
+                        && (!resolved.starts_with(['<', '.', '/'])
+                            || resolved.starts_with("<unresolved>::"))
+                        && !resolved.starts_with("unresolved-import(")
+                        && !source_modules.contains(resolved.as_str())
+                        && !resolved
+                            .char_indices()
+                            .any(|(i, c)| c == '.' && source_modules.contains(&resolved[..i]))
+                    {
+                        external_bases
+                            .bases
+                            .entry((file.language.as_str(), t.fqn.as_str()))
+                            .or_default()
+                            .push(resolved);
+                    }
+                }
+            }
+        }
+        if !external_bases.bases.is_empty() {
+            for file in files {
+                for t in &file.types {
+                    if let Some(suffix) =
+                        matches!(file.language.as_str(), "javascript" | "typescript")
+                            .then(|| t.fqn.strip_prefix(&file.module))
+                            .flatten()
+                    {
+                        external_bases.aliases.insert(
+                            (file.language.as_str(), format!("{}{suffix}", file.path)),
+                            t.fqn.as_str(),
+                        );
                     }
                 }
             }
@@ -1702,6 +1757,30 @@ impl CallGraph {
                 }
             }
         }
+        // Exported module constants resolve their type in the declaring module.
+        let constant_types = files
+            .iter()
+            .flat_map(|file| {
+                file.constants.iter().filter_map(|constant| {
+                    let symbol = format!("{}.{}", file.module, constant.name);
+                    let raw = constant.type_name.as_deref()?;
+                    let ty = resolve_type_reference(
+                        file,
+                        raw,
+                        &symbol,
+                        &constant.range,
+                        &modules,
+                        &exports,
+                        &types,
+                    );
+                    // ESM imports name the declaring file (`src/db.ts.db`).
+                    let alias = format!("{}.{}", file.path, constant.name);
+                    let language = file.language.as_str();
+                    Some([((language, symbol), ty.clone()), ((language, alias), ty)])
+                })
+            })
+            .flatten()
+            .collect::<BTreeMap<_, _>>();
         let mut returns_by_id = BTreeMap::<String, String>::new();
         let property_index = properties::PropertyIndex::new(files, &modules, &exports, &types);
         let mut implementations = BTreeMap::<&str, BTreeMap<String, Vec<String>>>::new();
@@ -2229,7 +2308,34 @@ impl CallGraph {
                                 .cloned();
                         }
                     }
-                    if !call.binding_unknown && receiver_type.is_none() {
+                    // Set when the member-path walk or an imported constant already
+                    // produced the qualified receiver identity.
+                    let mut qualified_receiver = false;
+                    // An imported module constant (`export const db = new Client()`)
+                    // keeps the type its declaring module gives it.
+                    let imported_constant = call
+                        .receiver
+                        .as_deref()
+                        .filter(|_| !call.binding_unknown && !call.local_binding)
+                        .and_then(|receiver| {
+                            let root = receiver.split(['.', '?']).next()?;
+                            let target = imports.get(root)?;
+                            constant_types.get(&(
+                                file.language.as_str(),
+                                canonical_export(&file.language, target, &runtime_exports),
+                            ))
+                        });
+                    if let Some(ty) = imported_constant.filter(|_| {
+                        call.receiver
+                            .as_deref()
+                            .is_some_and(|receiver| imports.contains_key(receiver))
+                    }) {
+                        receiver_type = Some(ty.clone());
+                        qualified_receiver = true;
+                    }
+                    if !call.binding_unknown
+                        && (receiver_type.is_none() || imported_constant.is_some())
+                    {
                         if let Some(receiver) = call.receiver.as_deref() {
                             let path = receiver
                                 .replace("?->", ".")
@@ -2245,21 +2351,71 @@ impl CallGraph {
                                 })
                             {
                                 let root = parts[0].trim_start_matches('$');
-                                let initial = call
-                                    .receiver_root_type
-                                    .as_ref()
-                                    .or_else(|| local_types.get(root));
+                                let initial = imported_constant.cloned().or_else(|| {
+                                    call.receiver_root_type
+                                        .as_ref()
+                                        .or_else(|| local_types.get(root))
+                                        .map(|initial| {
+                                            resolve_type_reference(
+                                                file,
+                                                initial,
+                                                &f.fqn,
+                                                &call.range,
+                                                &modules,
+                                                &exports,
+                                                &types,
+                                            )
+                                        })
+                                });
                                 if let Some(initial) = initial {
-                                    let mut ty = Some(resolve_type_reference(
-                                        file,
-                                        initial,
-                                        &f.fqn,
-                                        &call.range,
-                                        &modules,
-                                        &exports,
-                                        &types,
-                                    ));
+                                    let mut ty = Some(initial);
+                                    let mut external_member_path = false;
+                                    // A type without project or native metadata (an
+                                    // imported library class) has no field table.
+                                    // Keep the member path under that type so chained
+                                    // calls such as `client.user.findMany()` remain
+                                    // attributable by external-operation patterns.
+                                    let external_owner = |owner: &str| {
+                                        let language = file.language.as_str();
+                                        !owner.starts_with("<type-only>::")
+                                            && !types.contains(&(language, owner))
+                                            && !fields
+                                                .get(language)
+                                                .is_some_and(|known| known.contains_key(owner))
+                                            && !parents
+                                                .get(language)
+                                                .is_some_and(|known| known.contains_key(owner))
+                                            && !strategy.is_native_receiver(owner)
+                                            && !project_modules.contains(&(language, owner))
+                                            && !owner.char_indices().any(|(i, c)| {
+                                                matches!(c, '.' | ':' | '\\')
+                                                    && project_modules
+                                                        .contains(&(language, &owner[..i]))
+                                            })
+                                    };
                                     for name in &parts[1..] {
+                                        if let Some(owner) =
+                                            ty.as_deref().filter(|owner| external_owner(owner))
+                                        {
+                                            ty = Some(format!("{owner}.{name}"));
+                                            external_member_path = true;
+                                            continue;
+                                        }
+                                        // A member inherited from a library base class
+                                        // (`class Db extends PrismaClient`).
+                                        if let Some(base) = ty.as_deref().and_then(|owner| {
+                                            external_bases.member_owner(
+                                                &file.language,
+                                                owner,
+                                                name,
+                                                &fields,
+                                                &parents,
+                                            )
+                                        }) {
+                                            ty = Some(format!("{base}.{name}"));
+                                            external_member_path = true;
+                                            continue;
+                                        }
                                         ty = ty.and_then(|owner| {
                                             if file.language == "python" {
                                                 return inheritance.python_order(&owner).and_then(
@@ -2290,7 +2446,13 @@ impl CallGraph {
                                             )
                                         });
                                     }
-                                    receiver_type = ty;
+                                    if ty.is_some() {
+                                        qualified_receiver |=
+                                            external_member_path || imported_constant.is_some();
+                                        receiver_type = ty;
+                                    } else if imported_constant.is_none() {
+                                        receiver_type = None;
+                                    }
                                 }
                             }
                         }
@@ -2358,9 +2520,12 @@ impl CallGraph {
                                     })
                                     .flatten()
                             })
+                            .filter(|_| !qualified_receiver)
                             .cloned()
                             .unwrap_or_else(|| {
-                                if types.contains(&(file.language.as_str(), t)) {
+                                if qualified_receiver
+                                    || types.contains(&(file.language.as_str(), t))
+                                {
                                     return t.to_owned();
                                 }
                                 resolve_type_reference(
@@ -2488,6 +2653,25 @@ impl CallGraph {
                     } else {
                         candidates.clone()
                     };
+                    // `this.$connect()` in `class Db extends PrismaClient`.
+                    if let Some(base) = receiver_type
+                        .as_deref()
+                        .filter(|_| !call.binding_unknown)
+                        .and_then(|owner| {
+                            external_bases.member_owner(
+                                &file.language,
+                                owner,
+                                &call.name,
+                                &fields,
+                                &parents,
+                            )
+                        })
+                    {
+                        external_candidates.extend([
+                            format!("{base}.{}", call.name),
+                            format!("{base}::{}", call.name),
+                        ]);
+                    }
                     if let Some(receiver) = call
                         .receiver
                         .as_ref()
@@ -2506,6 +2690,47 @@ impl CallGraph {
                                 format!("{imported}::{}", call.name),
                                 format!("{imported}{}{}", strategy.method_separator(), call.name),
                             ]);
+                        }
+                    }
+                    // Library patterns name the package specifier: the default
+                    // import is the package value (CJS/esModuleInterop), and an
+                    // installed but unparsed package must not hide the library.
+                    if matches!(file.language.as_str(), "javascript" | "typescript")
+                        && !call.binding_unknown
+                        && !call.local_binding
+                    {
+                        let symbol = call.receiver.as_deref().unwrap_or(&call.name);
+                        let (root, rest) = symbol.split_once('.').unwrap_or((symbol, ""));
+                        if let (Some(import), Some(resolved)) =
+                            (imports.import(root), imports.get(root))
+                        {
+                            let owned = resolved.char_indices().any(|(i, c)| {
+                                matches!(c, '.' | ':') && source_modules.contains(&resolved[..i])
+                            }) || source_modules.contains(resolved.as_str());
+                            if let Some(source) = import.source.as_deref().filter(|source| {
+                                !owned
+                                    && !source.starts_with(['.', '/', '#'])
+                                    && !source.contains("://")
+                            }) {
+                                let package = [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"]
+                                    .iter()
+                                    .find_map(|extension| source.strip_suffix(extension))
+                                    .unwrap_or(source);
+                                let member = import.path.strip_prefix(package).unwrap_or("");
+                                let mut base = format!(
+                                    "{}{}",
+                                    package.strip_prefix("node:").unwrap_or(package),
+                                    if member == ".default" { "" } else { member }
+                                );
+                                if !rest.is_empty() {
+                                    base = format!("{base}.{rest}");
+                                }
+                                external_candidates.push(if call.receiver.is_some() {
+                                    format!("{base}.{}", call.name)
+                                } else {
+                                    base
+                                });
+                            }
                         }
                     }
                     let has_definition = !call.binding_unknown
@@ -3609,6 +3834,10 @@ impl CallGraph {
             })
             .collect()
     }
+    pub(crate) fn packages_of(&self, file: Option<&str>) -> &[String] {
+        file.and_then(|file| self.source_packages.get(file))
+            .map_or(&[], Vec::as_slice)
+    }
     pub fn relations(
         &self,
         a: &[String],
@@ -3752,12 +3981,13 @@ impl CallGraph {
         self.nodes
             .iter()
             .filter(|node| {
+                let packages = self.packages_of(node.file.as_deref());
                 include.iter().any(|selector| {
                     (!node.vendor || selector.starts_with("vendor:"))
-                        && selector_matches(selector, node)
+                        && selector_matches(selector, node, packages)
                 }) && !exclude
                     .iter()
-                    .any(|selector| selector_matches(selector, node))
+                    .any(|selector| selector_matches(selector, node, packages))
             })
             .map(|node| node.id.clone())
             .collect()
@@ -3943,18 +4173,6 @@ impl CallGraph {
             .into_iter()
             .flatten()
             .map(|index| &self.edges[*index])
-    }
-    pub(crate) fn node_index_is_current(&self) -> bool {
-        // Public node vectors can be edited without reindexing. Verify last-wins
-        // duplicate semantics before metrics reuse the private lookup table.
-        self.by_id
-            .iter()
-            .all(|(id, &index)| self.nodes.get(index).is_some_and(|node| node.id == *id))
-            && self
-                .nodes
-                .iter()
-                .enumerate()
-                .all(|(index, node)| self.by_id.get(&node.id).is_some_and(|&last| last >= index))
     }
     pub fn node(&self, id: &str) -> Option<&GraphNode> {
         self.by_id.get(id).and_then(|i| self.nodes.get(*i))
@@ -4287,6 +4505,69 @@ fn declared_field_type(
         }
     }
     (!unknown && matches.len() == 1).then(|| matches.into_iter().next().unwrap().to_owned())
+}
+
+/// JS/TS library base classes imported from a package (`class Db extends
+/// PrismaClient`). They have no metadata, so inherited members keep the
+/// library identity for external-operation patterns.
+#[derive(Default)]
+struct ExternalBases<'a> {
+    bases: BTreeMap<(&'a str, &'a str), Vec<String>>,
+    /// ESM file-path spellings (`src/db.ts.Db`) of declared type FQNs.
+    aliases: BTreeMap<(&'a str, String), &'a str>,
+}
+impl ExternalBases<'_> {
+    /// The one library base whose member `name` a project type inherits,
+    /// unless a project class in its hierarchy declares that member.
+    fn member_owner(
+        &self,
+        language: &str,
+        owner: &str,
+        name: &str,
+        fields: &BTreeMap<&str, BTreeMap<&str, BTreeMap<&str, Option<String>>>>,
+        parents: &BTreeMap<&str, BTreeMap<&str, Vec<String>>>,
+    ) -> Option<String> {
+        if self.bases.is_empty() {
+            return None;
+        }
+        let canonical = |owner: &str| {
+            self.aliases
+                .get(&(language, owner.to_owned()))
+                .map_or_else(|| owner.to_owned(), |fqn| (*fqn).to_owned())
+        };
+        let mut pending = vec![canonical(owner)];
+        let mut visited = BTreeSet::new();
+        let mut bases = BTreeSet::new();
+        while let Some(owner) = pending.pop() {
+            if !visited.insert(owner.clone()) {
+                continue;
+            }
+            // JS/TS instance methods and accessors are recorded as members too.
+            if fields
+                .get(language)
+                .and_then(|types| types.get(owner.as_str()))
+                .is_some_and(|fields| fields.contains_key(name))
+            {
+                return None;
+            }
+            bases.extend(
+                self.bases
+                    .get(&(language, owner.as_str()))
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
+            pending.extend(
+                parents
+                    .get(language)
+                    .and_then(|types| types.get(owner.as_str()))
+                    .into_iter()
+                    .flatten()
+                    .map(|base| canonical(base)),
+            );
+        }
+        (bases.len() == 1).then(|| bases.into_iter().next().unwrap())
+    }
 }
 
 /// Match imported roots only at the language's qualification separator. This
@@ -4635,6 +4916,30 @@ fn resolve_import_path(file: &FileModel, imported: &str, modules: &ModuleIndex<'
                 parts.pop();
             }
             let rest = imported.trim_start_matches('.');
+            if dots == 0 {
+                // Python 3 has no implicit relative imports, but a script run from this
+                // directory still sees its siblings first. Bind there only when the imported
+                // top-level name itself is a module (not merely the enclosing package), and
+                // inside a regular package not when it names a standard-library module.
+                let package = parts.join(".");
+                if parts.is_empty()
+                    || modules.contains(&("python", package.as_str()))
+                        && modules.native_receiver("python", rest)
+                {
+                    return imported.to_owned();
+                }
+                let candidate = format!("{package}.{rest}");
+                let head = package.len() + 1 + rest.find('.').unwrap_or(rest.len());
+                let found = modules.contains(&("python", candidate.as_str()))
+                    || candidate.match_indices('.').any(|(index, _)| {
+                        index >= head && modules.contains(&("python", &candidate[..index]))
+                    });
+                return if found {
+                    candidate
+                } else {
+                    imported.to_owned()
+                };
+            }
             if parts.is_empty() {
                 rest.to_owned()
             } else {
@@ -5324,7 +5629,8 @@ fn component_prefix(value: &str, prefix: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with("::") || suffix.starts_with(['.', '\\', '/']))
 }
 
-pub(crate) fn selector_matches(selector: &str, node: &GraphNode) -> bool {
+/// `packages` are the project package names owning the node's file.
+pub(crate) fn selector_matches(selector: &str, node: &GraphNode, packages: &[String]) -> bool {
     let Some((kind, value)) = selector.split_once(':') else {
         return node.id == selector || node.label.contains(selector);
     };
@@ -5347,16 +5653,17 @@ pub(crate) fn selector_matches(selector: &str, node: &GraphNode) -> bool {
                 .is_some_and(|module| component_prefix(module, value))
                 || component_prefix(&node.label, value)
                 || kind == "pkg"
-                    && node
+                    && (node
                         .package
                         .as_deref()
                         .is_some_and(|package| component_prefix(package, value))
+                        || packages.iter().any(|package| package == value))
         }
         "vendor" => {
             node.vendor
                 && (value == "*"
                     || value == "all"
-                    || selector_matches(value, node)
+                    || selector_matches(value, node, packages)
                     || node.package.as_deref().is_some_and(|package| {
                         component_prefix(package, value) || pattern_matches(value, package)
                     })

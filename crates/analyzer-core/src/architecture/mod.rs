@@ -20,6 +20,43 @@ pub(crate) fn dependency_facts<'a>(
     graph::dependencies(&files, calls, &symbols)
 }
 
+/// Files the architecture graph covers: non-vendor and outside `architecture.exclude`.
+fn selected_files<'a>(files: &'a [FileModel], config: &ArchitectureConfig) -> Vec<&'a FileModel> {
+    let matchers = config
+        .exclude
+        .iter()
+        .filter_map(|p| globset::Glob::new(p).ok().map(|g| g.compile_matcher()))
+        .collect::<Vec<_>>();
+    files
+        .iter()
+        .filter(|f| !f.vendor && !matchers.iter().any(|m| m.is_match(&f.path)))
+        .collect()
+}
+
+/// Paths of the selected files whose module is in a multi-module `arch_cycle`
+/// SCC. Symbols resolve over the same file set as the rule, so a declaration
+/// duplicated in an excluded file cannot make `module_cycle` drift from it.
+pub(crate) fn cyclic_module_paths<'a>(
+    files: &'a [FileModel],
+    calls: &CallGraph,
+    config: &ArchitectureConfig,
+) -> BTreeSet<&'a str> {
+    let files = selected_files(files, config);
+    let symbols = graph::Symbols::new(&files);
+    let (dependencies, _) = graph::dependencies(&files, calls, &symbols);
+    let edges = rules::module_graph(&rules::runtime_dependencies(&dependencies), &symbols);
+    let cyclic = graph::components(&edges)
+        .into_iter()
+        .filter(|group| group.len() > 1)
+        .flatten()
+        .collect::<BTreeSet<_>>();
+    files
+        .iter()
+        .filter(|f| cyclic.contains(&rules::module_key(f)))
+        .map(|f| f.path.as_str())
+        .collect()
+}
+
 pub struct RuleSpec {
     pub id: &'static str,
     pub title: &'static str,
@@ -113,15 +150,7 @@ pub fn analyze(
         .into(),
         ..Default::default()
     };
-    let matchers = config
-        .exclude
-        .iter()
-        .filter_map(|p| globset::Glob::new(p).ok().map(|g| g.compile_matcher()))
-        .collect::<Vec<_>>();
-    let selected = files
-        .iter()
-        .filter(|f| !f.vendor && !matchers.iter().any(|m| m.is_match(&f.path)))
-        .collect::<Vec<_>>();
+    let selected = selected_files(files, config);
     summary.analyzed_files = if config.enabled { selected.len() } else { 0 };
     summary.excluded_files = files.len() - summary.analyzed_files;
     let mut out = Vec::new();
@@ -193,6 +222,7 @@ pub fn analyze(
                 "arch_cycle" => rules::cycles(&dependencies, &symbols, config, &mut out),
                 "arch_boundary" => rules::boundaries(
                     &dependencies,
+                    calls,
                     &symbols,
                     config,
                     &mut summary.diagnostics,

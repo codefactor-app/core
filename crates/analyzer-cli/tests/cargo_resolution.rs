@@ -755,3 +755,72 @@ fn malformed_package_metadata_cannot_crash_dependency_feature_linking_or_bind_a_
         .iter()
         .any(|message| message.contains("Cargo package name is missing or invalid")));
 }
+#[test]
+fn pkg_selector_matches_workspace_member_packages() {
+    let f = Fixture::new();
+    f.write(
+        "Cargo.toml",
+        "[package]\nname='myapp'\nversion='0.1.0'\n[workspace]\nmembers=['crates/core','crates/storage']\n",
+    );
+    f.write("src/main.rs", "fn main(){}\n");
+    f.write("crates/core/Cargo.toml", "[package]\nname='myapp-core'\nversion='0.1.0'\n[lib]\nname='core_lib'\n[dependencies]\nmyapp-storage={path='../storage'}\n");
+    f.write(
+        "crates/core/src/lib.rs",
+        "pub mod domain;pub fn handle(){myapp_storage::load();}\n",
+    );
+    f.write("crates/core/src/domain.rs", "pub fn total(){}\n");
+    f.write(
+        "crates/storage/Cargo.toml",
+        "[package]\nname='myapp-storage'\nversion='0.1.0'\n",
+    );
+    f.write("crates/storage/src/lib.rs", "pub fn load(){}\n");
+    let report = f.scan(config());
+    let labels = |ids: &[String]| {
+        ids.iter()
+            .map(|id| report.graph.node(id).unwrap().label.clone())
+            .collect::<BTreeSet<_>>()
+    };
+    for core in ["pkg:myapp-core", "pkg:myapp_core", "pkg:core_lib"] {
+        let relations = report
+            .graph
+            .relations(&[core.into()], &["pkg:myapp-storage".into()], None);
+        assert_eq!(
+            labels(&relations.a),
+            BTreeSet::from([
+                "crates::core::src::lib::handle".to_string(),
+                "crates::core::src::domain::total".to_string(),
+            ]),
+            "{core}"
+        );
+        assert_eq!(
+            labels(&relations.b),
+            BTreeSet::from(["crates::storage::src::lib::load".to_string()])
+        );
+        assert_eq!(relations.a_to_b.len(), 1, "{core}");
+    }
+    let select = |selector: &str| labels(&report.graph.relations(&[selector.into()], &[], None).a);
+    // The root package does not own files of its workspace members.
+    assert_eq!(
+        select("pkg:myapp"),
+        BTreeSet::from(["src::main::main".to_string()])
+    );
+    assert!(select("pkg:myapp-cor").is_empty());
+    assert!(select("pkg:storage").is_empty());
+    assert_eq!(select("pkg:crates::core").len(), 2);
+
+    for (from, to, expected) in [("domain", "infra", 1), ("infra", "domain", 0)] {
+        let mut cfg = config();
+        cfg.architecture = serde_yaml::from_str(&format!("enabled: true\nlayers:\n  - {{name: domain, selectors: ['pkg:myapp-core']}}\n  - {{name: infra, selectors: ['pkg:myapp-storage']}}\nforbidden_dependencies:\n  - {{from: {from}, to: {to}}}\n")).unwrap();
+        let report = f.scan(cfg);
+        assert_eq!(
+            report
+                .violations
+                .iter()
+                .filter(|v| v.rule == "arch_boundary")
+                .count(),
+            expected,
+            "{from} -> {to}: {:?}",
+            report.violations
+        );
+    }
+}

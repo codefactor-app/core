@@ -625,6 +625,26 @@ impl Walker<'_> {
         if let Some(n) = name(node, self.source) {
             return env.get(&n).cloned().unwrap_or(Binding::Unknown);
         }
+        if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript)
+            && node.kind() == "binary_expression"
+            && child(node, "operator")
+                .is_some_and(|operator| matches!(snippet(operator, self.source), "||" | "??"))
+        {
+            // Lazy singleton idiom `cached ?? new Client()`: the fallback states
+            // the type when the cached operand carries no type evidence.
+            let operand = |field| {
+                child(node, field)
+                    .map(|n| self.value(n, env))
+                    .unwrap_or(Binding::Unknown)
+            };
+            return match (operand("left"), operand("right")) {
+                (
+                    Binding::Pending | Binding::Unknown,
+                    Binding::Type(ty) | Binding::Object(ty, _),
+                ) => Binding::Type(ty),
+                (cached, fallback) => merge_types([cached, fallback]),
+            };
+        }
         if ["new_expression", "object_creation_expression"].contains(&node.kind()) {
             let raw = snippet(node, self.source)
                 .trim_start_matches("new ")
@@ -753,9 +773,78 @@ fn declared_names(
     }
     names
 }
+/// JS/TS module-scope `const` declarations with one declared or constructed
+/// type. A `const` is never reassigned, so every function of the module and
+/// every importer may use that type.
+pub(super) fn module_constants(
+    root: Node<'_>,
+    types: &ScopedTypes<'_, '_>,
+    imports: &[Import],
+    dialect: Dialect,
+    source: &str,
+    path: &Path,
+) -> Vec<Field> {
+    let module = range(root, path);
+    let mut env = imports
+        .iter()
+        .filter(|i| applies(i, &module))
+        .map(|i| (import_name(i).to_owned(), import_binding(i)))
+        .collect::<BTreeMap<_, _>>();
+    let mut function = FunctionModel::default();
+    let walker = Walker {
+        dialect,
+        source,
+        types,
+        imports,
+        nested: &BTreeMap::new(),
+        owner: "",
+        calls: BTreeMap::new(),
+        function: &mut function,
+    };
+    let mut constants = Vec::new();
+    for statement in named_children(root) {
+        let declaration = if statement.kind() == "export_statement" {
+            child(statement, "declaration")
+        } else {
+            Some(statement)
+        };
+        let Some(declaration) = declaration.filter(|d| {
+            d.kind() == "lexical_declaration"
+                && child(*d, "kind").is_some_and(|kind| snippet(kind, source) == "const")
+        }) else {
+            continue;
+        };
+        for declarator in named_children(declaration) {
+            let Some(n) = child(declarator, "name").and_then(|n| name(n, source)) else {
+                continue;
+            };
+            let declared = child(declarator, "type")
+                .map(|ty| typed(snippet(ty, source), dialect))
+                .filter(|binding| *binding != Binding::Unknown);
+            let binding = declared
+                .or_else(|| child(declarator, "value").map(|v| walker.value(v, &env)))
+                .unwrap_or(Binding::Unknown);
+            let ty = match &binding {
+                Binding::Type(ty) | Binding::Object(ty, _) => Some(ty.clone()),
+                _ => None,
+            };
+            env.insert(n.clone(), ty.clone().map_or(binding, Binding::Type));
+            if let Some(ty) = ty {
+                constants.push(Field {
+                    name: n,
+                    type_name: Some(ty),
+                    range: range(declarator, path),
+                    ..Field::default()
+                });
+            }
+        }
+    }
+    constants
+}
 pub(super) fn annotate(
     node: Node<'_>,
     f: &mut FunctionModel,
+    constants: &[Field],
     types: &ScopedTypes<'_, '_>,
     imports: &[Import],
     nested: &BTreeMap<(String, String), String>,
@@ -780,7 +869,13 @@ pub(super) fn annotate(
             .iter()
             .map(|mutation| mutation.site.clone()),
     );
-    let mut env = BTreeMap::new();
+    // Module constants are the outermost scope; everything below shadows them.
+    // The module initializer binds them itself in source order.
+    let mut env = constants
+        .iter()
+        .filter(|_| !f.is_module_initializer())
+        .filter_map(|c| Some((c.name.clone(), Binding::Type(c.type_name.clone()?))))
+        .collect::<BTreeMap<_, _>>();
     let mut ancestors = Vec::new();
     let mut ancestor = node.parent();
     while let Some(parent) = ancestor {
