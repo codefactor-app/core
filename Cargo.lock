@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "analyzer-cli"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "analyzer-core",
  "analyzer-javascript",
@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "analyzer-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "globset",
  "ignore",
@@ -52,7 +52,7 @@ dependencies = [
 
 [[package]]
 name = "analyzer-javascript"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "analyzer-core",
  "analyzer-parser",
@@ -61,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "analyzer-parser"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "analyzer-core",
  "tree-sitter",
@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "analyzer-php"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "analyzer-core",
  "analyzer-parser",
@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "analyzer-python"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "analyzer-core",
  "analyzer-parser",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "analyzer-rust"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "analyzer-core",
  "analyzer-parser",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "analyzer-typescript"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "analyzer-core",
  "analyzer-parser",

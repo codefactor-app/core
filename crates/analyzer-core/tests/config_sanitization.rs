@@ -272,3 +272,36 @@ fn variadic_counting_is_independent_of_receiver_counting_and_validates_boolean_v
         "metrics.count_variadic_parameters"
     );
 }
+
+#[test]
+fn core_version_is_registered_validated_and_only_read_from_primary_yaml() {
+    let fixture = Fixture::new("include: included.yaml\ncore: {version: '0.2.0'}\n");
+    std::fs::write(
+        fixture.0.join("included.yaml"),
+        "core: {version: '9.9.9'}\npaths: {exclude: ['generated/**']}\n",
+    )
+    .unwrap();
+    let loader = ConfigLoader::new();
+    let load = loader
+        .load(&fixture.0.join("analyzer.yaml"), true, true)
+        .unwrap();
+    assert_eq!(load.config.core.version, "0.2.0");
+    assert_eq!(load.config.paths.exclude, vec!["generated/**"]);
+    assert!(load
+        .diagnostics
+        .iter()
+        .any(|d| d.message.contains("primary config")));
+    assert!(loader.keys().iter().any(|key| key.name == "core.version"));
+    std::fs::write(fixture.0.join("analyzer.yaml"), "include: included.yaml\n").unwrap();
+    assert_eq!(fixture.load(false).config.core.version, "latest");
+    for value in ["null", "true", "123", "'^0.1.0'", "'../0.1.0'", "'v0.1.0'"] {
+        std::fs::write(
+            fixture.0.join("analyzer.yaml"),
+            format!("core: {{version: {value}}}\n"),
+        )
+        .unwrap();
+        let load = fixture.load(true);
+        assert_eq!(load.config.core.version, "latest");
+        assert!(load.diagnostics.iter().any(|d| d.path == "core.version"));
+    }
+}

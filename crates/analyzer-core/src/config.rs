@@ -11,6 +11,7 @@ use yaml_rust2::scanner::Marker;
 #[serde(default)]
 pub struct Config {
     pub config_version: u32,
+    pub core: CoreConfig,
     pub paths: PathsConfig,
     pub languages: LanguagesConfig,
     pub vendor: VendorConfig,
@@ -29,6 +30,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             config_version: 1,
+            core: CoreConfig::default(),
             paths: PathsConfig::default(),
             languages: LanguagesConfig::default(),
             vendor: VendorConfig::default(),
@@ -42,6 +44,20 @@ impl Default for Config {
             output: OutputConfig::default(),
             algorithmic_complexity: crate::algorithmic::AlgorithmicConfig::default(),
             architecture: crate::architecture::ArchitectureConfig::default(),
+        }
+    }
+}
+
+/// Package launcher settings. The core recognizes these but never downloads itself.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CoreConfig {
+    pub version: String,
+}
+impl Default for CoreConfig {
+    fn default() -> Self {
+        Self {
+            version: "latest".into(),
         }
     }
 }
@@ -420,10 +436,26 @@ impl ConfigLoader {
         verbose: bool,
     ) -> Result<ConfigLoad, ConfigError> {
         let source = std::fs::read_to_string(path)?;
-        let raw: Value = serde_yaml::from_str(&source)?;
+        let mut raw: Value = serde_yaml::from_str(&source)?;
+        // Launcher settings belong to the primary file, never to analysis includes.
+        let core = raw
+            .as_mapping_mut()
+            .and_then(|map| map.remove(Value::String("core".into())));
         let mut state = LoadState::default();
         let mut stack = Vec::new();
         let mut resolved = self.expand(raw, path, &mut stack, 0, &mut state);
+        if let (Some(core), Some(map)) = (core, resolved.as_mapping_mut()) {
+            for key in ["core", "core.version"] {
+                state.provenance.insert(
+                    key.into(),
+                    SourceLocation {
+                        file: path.display().to_string(),
+                        line: find_key_line(path, key),
+                    },
+                );
+            }
+            map.insert(Value::String("core".into()), core);
+        }
         // The short spelling from the specification is equivalent to languages.enabled.
         if let Value::Mapping(map) = &mut resolved {
             let key = Value::String("languages".into());
@@ -557,11 +589,31 @@ impl ConfigLoader {
         }
     }
     fn register_builtin(&mut self) {
+        self.register_key(KeySpec::new(
+            "core.version",
+            "Core release: latest or X.Y.Z",
+            Arc::new(|v| {
+                if v.as_str().is_some_and(|s| {
+                    s == "latest" || {
+                        let parts: Vec<_> = s.split('.').collect();
+                        parts.len() == 3
+                            && parts
+                                .iter()
+                                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+                    }
+                }) {
+                    Ok(())
+                } else {
+                    Err("expected latest or X.Y.Z".into())
+                }
+            }),
+        ));
         crate::algorithmic::register_config(self);
         crate::architecture::register_config(self);
         let any: Validator = Arc::new(|_| Ok(()));
         for key in [
             "config_version",
+            "core",
             "paths",
             "paths.include",
             "paths.exclude",
@@ -625,6 +677,7 @@ impl ConfigLoader {
         // Validate container shapes before walking their children. Otherwise a bad
         // section can make deserialization discard every valid sibling setting.
         for path in [
+            "core",
             "paths",
             "languages",
             "languages.extensions",
@@ -890,6 +943,13 @@ impl ConfigLoader {
     ) -> Value {
         match value {
             Value::Mapping(mut map) => {
+                if path.is_empty() && map.remove(Value::String("core".into())).is_some() {
+                    state.warn(
+                        "core",
+                        "core settings in included YAML are ignored; use the primary config",
+                        file,
+                    );
+                }
                 let include = if path == "paths" {
                     None
                 } else {

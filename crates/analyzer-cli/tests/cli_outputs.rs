@@ -433,3 +433,22 @@ fn scan_defaults_to_bounded_human_output_and_machine_export_stays_complete() {
     assert!(!std::fs::read_to_string(out).unwrap().contains('\x1b'));
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn package_core_version_is_visible_and_accepted_by_strict_config_commands() {
+    let root = fixture();
+    let config = root.join("analyzer.yaml");
+    std::fs::write(&config, "core: {version: '0.1.2'}\n").unwrap();
+    let file = config.to_str().unwrap();
+    run(&["config", "check", "--file", file, "--strict"]);
+    assert!(run(&["config", "keys"]).contains("core.version"));
+    assert!(run(&["config", "show", "--file", file, "--resolved"]).contains("0.1.2"));
+    run(&[
+        "scan",
+        root.to_str().unwrap(),
+        "--strict-config",
+        "--format",
+        "json",
+    ]);
+    std::fs::remove_dir_all(root).unwrap();
+}
