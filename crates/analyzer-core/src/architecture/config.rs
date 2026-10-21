@@ -20,6 +20,8 @@ pub struct ArchitectureConfig {
     pub disabled_rules: Vec<String>,
     pub rules: BTreeMap<String, RuleConfig>,
     pub layers: Vec<Layer>,
+    /// Explicit file-level component groups; unmatched files retain native modules.
+    pub modules: Vec<Layer>,
     pub forbidden_dependencies: Vec<Boundary>,
     pub composition_roots: Vec<String>,
     pub max_evidence: usize,
@@ -47,6 +49,7 @@ impl Default for ArchitectureConfig {
             disabled_rules: vec![],
             rules: BTreeMap::new(),
             layers: vec![],
+            modules: vec![],
             forbidden_dependencies: vec![],
             composition_roots: vec![],
             max_evidence: 50,
@@ -83,6 +86,21 @@ pub struct Boundary {
 impl ArchitectureConfig {
     pub fn rule(&self, id: &str) -> RuleConfig {
         self.rules.get(id).cloned().unwrap_or_default()
+    }
+    pub(super) fn validate_modules(&self) -> Result<(), String> {
+        let mut module_names = BTreeSet::new();
+        for module in &self.modules {
+            if module.name.trim().is_empty()
+                || !module_names.insert(&module.name)
+                || module.selectors.is_empty()
+            {
+                return Err("modules require unique nonempty names and selectors".into());
+            }
+            for selector in &module.selectors {
+                validate_module_selector(selector)?;
+            }
+        }
+        Ok(())
     }
     pub fn validate(&self) -> Result<(), String> {
         if self.max_evidence == 0 || self.max_evidence > 500 {
@@ -150,6 +168,7 @@ impl ArchitectureConfig {
                 return Err(format!("{id}: {key} is not applicable"));
             }
         }
+        self.validate_modules()?;
         let mut names = BTreeSet::new();
         for l in &self.layers {
             if l.name.is_empty() || !names.insert(&l.name) || l.selectors.is_empty() {
@@ -177,6 +196,15 @@ fn validate_selector(s: &str) -> Result<(), String> {
     }
     if kind == "glob" {
         globset::Glob::new(value).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+fn validate_module_selector(selector: &str) -> Result<(), String> {
+    validate_selector(selector)?;
+    if selector.starts_with("class:") {
+        return Err(
+            "module groups require whole-file selectors (ns, mod, dir, glob, file, pkg)".into(),
+        );
     }
     Ok(())
 }
@@ -251,6 +279,7 @@ pub fn register_config(loader: &mut ConfigLoader) {
         "architecture.exclude",
         "architecture.disabled_rules",
         "architecture.layers",
+        "architecture.modules",
         "architecture.forbidden_dependencies",
         "architecture.composition_roots",
     ] {
@@ -293,6 +322,7 @@ pub fn register_config(loader: &mut ConfigLoader) {
     }
     for key in [
         "architecture.layers.*",
+        "architecture.modules.*",
         "architecture.forbidden_dependencies.*",
     ] {
         loader.register_key(KeySpec::new(
@@ -301,6 +331,27 @@ pub fn register_config(loader: &mut ConfigLoader) {
             mapping.clone(),
         ));
     }
+    loader.register_key(KeySpec::new(
+        "architecture.modules.*.name",
+        "Unique module group name",
+        Arc::new(|v| {
+            if v.as_str().is_some_and(|s| !s.trim().is_empty()) {
+                Ok(())
+            } else {
+                Err("expected nonempty module name".into())
+            }
+        }),
+    ));
+    loader.register_key(KeySpec::new(
+        "architecture.modules.*.selectors",
+        "Module group selectors",
+        list.clone(),
+    ));
+    loader.register_key(KeySpec::new(
+        "architecture.modules.*.selectors.*",
+        "Whole-file architecture selector",
+        Arc::new(|v| validate_module_selector(v.as_str().ok_or("expected selector string")?)),
+    ));
     loader.register_key(KeySpec::new(
         "architecture.layers.*.name",
         "Unique layer name",

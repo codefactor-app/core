@@ -1,6 +1,8 @@
 //! Deterministic architecture witnesses, never blocking diagnostics.
 mod config;
 mod graph;
+mod grouping;
+pub(crate) use grouping::{module_cycles, validate_module_assignments};
 mod model;
 mod rules;
 use crate::graph::CallGraph;
@@ -30,30 +32,6 @@ fn selected_files<'a>(files: &'a [FileModel], config: &ArchitectureConfig) -> Ve
     files
         .iter()
         .filter(|f| !f.vendor && !matchers.iter().any(|m| m.is_match(&f.path)))
-        .collect()
-}
-
-/// Paths of the selected files whose module is in a multi-module `arch_cycle`
-/// SCC. Symbols resolve over the same file set as the rule, so a declaration
-/// duplicated in an excluded file cannot make `module_cycle` drift from it.
-pub(crate) fn cyclic_module_paths<'a>(
-    files: &'a [FileModel],
-    calls: &CallGraph,
-    config: &ArchitectureConfig,
-) -> BTreeSet<&'a str> {
-    let files = selected_files(files, config);
-    let symbols = graph::Symbols::new(&files);
-    let (dependencies, _) = graph::dependencies(&files, calls, &symbols);
-    let edges = rules::module_graph(&rules::runtime_dependencies(&dependencies), &symbols);
-    let cyclic = graph::components(&edges)
-        .into_iter()
-        .filter(|group| group.len() > 1)
-        .flatten()
-        .collect::<BTreeSet<_>>();
-    files
-        .iter()
-        .filter(|f| cyclic.contains(&rules::module_key(f)))
-        .map(|f| f.path.as_str())
         .collect()
 }
 
@@ -179,6 +157,17 @@ pub fn analyze(
         }
         started = std::time::Instant::now();
     };
+    let assignments = match grouping::assign_modules(&selected, calls, config) {
+        Ok(assignments) => assignments,
+        Err(error) => {
+            summary.diagnostics.push(error);
+            summary.rules = RULES
+                .iter()
+                .map(|r| coverage(r, "skipped", "Некорректное назначение модулей", 0))
+                .collect();
+            return (summary, out);
+        }
+    };
     let symbols = graph::Symbols::new(&selected);
     mark("symbols");
     let (dependencies, unresolved) = graph::dependencies(&selected, calls, &symbols);
@@ -219,7 +208,9 @@ pub fn analyze(
         let start = out.len();
         if matches!(status, "complete" | "partial") {
             match r.id {
-                "arch_cycle" => rules::cycles(&dependencies, &symbols, config, &mut out),
+                "arch_cycle" => {
+                    rules::cycles(&dependencies, &symbols, &assignments, config, &mut out)
+                }
                 "arch_boundary" => rules::boundaries(
                     &dependencies,
                     calls,
@@ -236,7 +227,7 @@ pub fn analyze(
                 "arch_lsp" => rules::substitution(&selected, &symbols, config, &mut out),
                 "arch_isp" => rules::interfaces(&selected, &symbols, config, &mut out),
                 "arch_demeter" => rules::demeter(&selected, &symbols, config, &mut out),
-                "arch_stability" => rules::stability(&dependencies, &symbols, config, &mut out),
+                "arch_stability" => rules::stability(&dependencies, &assignments, config, &mut out),
                 _ => {}
             }
         }
@@ -336,7 +327,7 @@ pub(super) fn emit(
     let mut affected_locations = evidence.iter().map(|e| e.range.clone()).collect::<Vec<_>>();
     affected_locations.dedup();
     evidence.truncate(config.max_evidence);
-    out.push(Violation{rule:id.into(),severity:Severity::Warn,file:range.file.to_string(),line:range.start_line,entity:entity.into(),value:None,limit:None,scope:match id{"arch_cycle"|"arch_boundary"|"arch_stability"=>"module","arch_srp"|"arch_lsp"|"arch_isp"=>"class",_=>"function"}.into(),algorithmic_complexity:None,architecture:Some(ArchitectureDiagnostic{
+    out.push(Violation{rule:id.into(),severity:Severity::Warn,file:range.file.to_string(),line:range.start_line,entity:entity.into(),value:None,limit:None,scope:match id{"arch_cycle"|"arch_boundary"|"arch_stability"=>"module","arch_srp"|"arch_lsp"|"arch_isp"=>"class",_=>"function"}.into(),algorithmic_complexity:None,module_cycle:None,architecture:Some(ArchitectureDiagnostic{
         principle:spec.principle.into(),title:spec.title.into(),fact,hypothesis:hypothesis.into(),evidence_kind:if matches!(id,"arch_cycle"|"arch_boundary"|"arch_dry"){"structural_fact"}else{"structural_heuristic"}.into(),cycle:None,measurements,evidence,affected_locations,evidence_total:total,participants,recommendations,
         limitations:vec!["Свидетельства относятся к статической модели; динамические цели не подтверждаются.".into(),"Архитектурная трактовка и полезность изменения требуют проверки контекста проекта.".into()]
     })});

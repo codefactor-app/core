@@ -35,3 +35,53 @@ fn malformed_trait_precedence_remains_a_syntax_error() {
         );
     }
 }
+
+#[test]
+fn keyword_named_arguments_are_accepted_by_both_php_grammars() {
+    let body = r#"
+function takes($list, $match, $array) {}
+class Example { function __construct($list) {} function takes($list) {} }
+takes(list: [], match: true, array: []);
+takes(LiSt: [], MaTcH: true, ArRaY: []);
+$object->takes(list: []);
+$object?->takes(list: []);
+Example::takes(list: []);
+new Example(list: []);
+"#;
+    let tagged = format!("<?php {body}");
+    let model = analyzer_php::Php.analyze(&tagged, Path::new("arguments.php"));
+    assert!(model.parse_errors.is_empty(), "{:?}", model.parse_errors);
+    for (source, language) in [
+        (tagged.as_str(), tree_sitter_php::LANGUAGE_PHP),
+        (body, tree_sitter_php::LANGUAGE_PHP_ONLY),
+    ] {
+        let ast = parse(
+            source,
+            Path::new("arguments.php"),
+            language.into(),
+            Dialect::Php,
+        );
+        assert!(ast.errors.is_empty(), "{:?}", ast.errors);
+    }
+}
+
+#[test]
+fn malformed_named_arguments_remain_syntax_errors() {
+    for source in ["takes(list:);", "takes(list:: []);", "new Example(list:);"] {
+        for (source, language) in [
+            (format!("<?php {source}"), tree_sitter_php::LANGUAGE_PHP),
+            (source.to_owned(), tree_sitter_php::LANGUAGE_PHP_ONLY),
+        ] {
+            let ast = parse(
+                &source,
+                Path::new("invalid.php"),
+                language.into(),
+                Dialect::Php,
+            );
+            assert!(
+                !ast.errors.is_empty(),
+                "accepted malformed named argument: {source}"
+            );
+        }
+    }
+}

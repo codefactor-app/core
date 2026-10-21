@@ -1421,6 +1421,13 @@ fn sarif(r: &AnalysisReport) -> anyhow::Result<String> {
                 result["properties"] = serde_json::json!({"architecture": detail, "non_blocking": true});
                 result["relatedLocations"] = serde_json::json!(detail.evidence.iter().enumerate().map(|(i,e)|serde_json::json!({"id": i+1, "message":{"text":e.description}, "physicalLocation":{"artifactLocation":{"uri":source_uri(&e.range.file)},"region":{"startLine":e.range.start_line.max(1)}}})).collect::<Vec<_>>());
             }
+            if let Some(detail) = &v.module_cycle {
+                result["properties"] = serde_json::json!({"module_cycle": detail});
+                result["relatedLocations"] = serde_json::json!(detail.files.iter().enumerate().map(|(i,file)| {
+                    let line = detail.affected_ranges().find(|range| range.file.as_ref() == file).map_or(1, |range| range.start_line.max(1));
+                    serde_json::json!({"id": i+1, "message":{"text":"File participating in the module dependency cycle"}, "physicalLocation":{"artifactLocation":{"uri":source_uri(file)},"region":{"startLine":line}}})
+                }).collect::<Vec<_>>());
+            }
             if !v.file.is_empty() && v.line > 0 {
                 result["locations"] = serde_json::json!([{"physicalLocation":{
                     "artifactLocation":{"uri":source_uri(&v.file)},"region":{"startLine":v.line}

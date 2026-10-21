@@ -464,6 +464,18 @@ pub fn advanced_metrics(
     sources: &BTreeMap<String, String>,
     architecture: &ArchitectureConfig,
 ) -> Vec<MetricValue> {
+    advanced_metrics_and_cycles(files, graph, sources, architecture).0
+}
+
+pub(crate) fn advanced_metrics_and_cycles(
+    files: &[FileModel],
+    graph: &CallGraph,
+    sources: &BTreeMap<String, String>,
+    architecture: &ArchitectureConfig,
+) -> (
+    Vec<MetricValue>,
+    Vec<crate::architecture::ModuleCycleDiagnostic>,
+) {
     advanced_metrics_with_text_facts(files, graph, architecture, |file| {
         FileTextFacts::new(
             file,
@@ -477,7 +489,10 @@ pub(crate) fn advanced_metrics_consuming_text_facts(
     graph: &CallGraph,
     architecture: &ArchitectureConfig,
     mut facts: BTreeMap<String, FileTextFacts>,
-) -> Vec<MetricValue> {
+) -> (
+    Vec<MetricValue>,
+    Vec<crate::architecture::ModuleCycleDiagnostic>,
+) {
     advanced_metrics_with_text_facts(files, graph, architecture, |file| {
         facts
             .remove(&file.path)
@@ -490,7 +505,10 @@ fn advanced_metrics_with_text_facts(
     graph: &CallGraph,
     architecture: &ArchitectureConfig,
     mut facts_for: impl FnMut(&FileModel) -> FileTextFacts,
-) -> Vec<MetricValue> {
+) -> (
+    Vec<MetricValue>,
+    Vec<crate::architecture::ModuleCycleDiagnostic>,
+) {
     let capacity = files
         .iter()
         .filter(|f| !f.vendor)
@@ -603,6 +621,9 @@ fn advanced_metrics_with_text_facts(
                 line: t.range.start_line,
                 value: depth as f64,
             });
+            if matches!(t.kind, TypeKind::Interface | TypeKind::Enum) {
+                continue;
+            }
             let methods = methods_by_type
                 .get(t.fqn.as_str())
                 .map(Vec::as_slice)
@@ -699,7 +720,11 @@ fn advanced_metrics_with_text_facts(
     }
     // Same SCC and file scope as `arch_cycle`: resolved calls plus property,
     // constant and variable access. Files in `architecture.exclude` report 0.
-    let cyclic = crate::architecture::cyclic_module_paths(files, graph, architecture);
+    let cycles = crate::architecture::module_cycles(files, graph, architecture);
+    let cyclic = cycles
+        .iter()
+        .flat_map(|cycle| cycle.files.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
     for file in files.iter().filter(|f| !f.vendor) {
         let cycle = cyclic.contains(file.path.as_str());
         out.push(MetricValue {
@@ -712,7 +737,7 @@ fn advanced_metrics_with_text_facts(
         });
     }
     out.sort_by(|a, b| (&a.path, &a.entity, &a.id).cmp(&(&b.path, &b.entity, &b.id)));
-    out
+    (out, cycles)
 }
 /// Cache acyclic depths. Values reached through a cycle depend on the active path
 /// and are deliberately not memoized, preserving the previous cycle semantics.
@@ -1130,7 +1155,7 @@ mod tests {
         let graph = CallGraph::default();
         let expected = advanced_metrics(&files, &graph, &sources, &Default::default());
         let actual =
-            advanced_metrics_consuming_text_facts(&files, &graph, &Default::default(), facts);
+            advanced_metrics_consuming_text_facts(&files, &graph, &Default::default(), facts).0;
         assert_eq!(
             serde_json::to_value(actual).unwrap(),
             serde_json::to_value(&expected).unwrap()

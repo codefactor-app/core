@@ -129,6 +129,23 @@ pub struct PathLimits {
     pub metrics: BTreeMap<String, Threshold>,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EntityGlobLimits {
+    pub glob: String,
+    #[serde(flatten)]
+    pub metrics: BTreeMap<String, Threshold>,
+}
+
+/// FQNs are opaque strings: PHP backslashes are literal and namespace
+/// separators do not restrict a wildcard match.
+pub(crate) fn entity_glob(pattern: &str) -> Result<globset::Glob, globset::Error> {
+    globset::GlobBuilder::new(pattern)
+        .backslash_escape(false)
+        .literal_separator(false)
+        .build()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LimitsConfig {
@@ -136,6 +153,7 @@ pub struct LimitsConfig {
     pub global: BTreeMap<String, Threshold>,
     pub by_language: BTreeMap<String, BTreeMap<String, Threshold>>,
     pub by_path: Vec<PathLimits>,
+    pub by_entity_glob: Vec<EntityGlobLimits>,
     pub by_entity: BTreeMap<String, BTreeMap<String, Threshold>>,
     pub aggregates: BTreeMap<String, Threshold>,
 }
@@ -153,6 +171,7 @@ impl Default for LimitsConfig {
             global,
             by_language: BTreeMap::new(),
             by_path: Vec::new(),
+            by_entity_glob: Vec::new(),
             by_entity: BTreeMap::new(),
             aggregates: BTreeMap::new(),
         }
@@ -364,7 +383,10 @@ impl ConfigLoader {
         if let Some(id) = spec.name.strip_prefix("limits.") {
             if !id.contains('.')
                 && !id.contains('*')
-                && !matches!(id, "by_language" | "by_path" | "by_entity" | "aggregates")
+                && !matches!(
+                    id,
+                    "by_language" | "by_path" | "by_entity_glob" | "by_entity" | "aggregates"
+                )
             {
                 self.metric_ids.insert(id.into());
             }
@@ -560,6 +582,10 @@ impl ConfigLoader {
             "limits.by_path.*",
             "limits.by_path.*.glob",
             "limits.by_path.*.*",
+            "limits.by_entity_glob",
+            "limits.by_entity_glob.*",
+            "limits.by_entity_glob.*.glob",
+            "limits.by_entity_glob.*.*",
             "limits.by_entity",
             "limits.by_entity.*",
             "limits.by_entity.*.*",
@@ -634,6 +660,7 @@ impl ConfigLoader {
             "resolution.rust.target",
             "languages.extensions.*",
             "limits.by_path.*.glob",
+            "limits.by_entity_glob.*.glob",
             "external.rules.*.category",
             "external.rules.*.pattern",
             "external.rules.*.library",
@@ -652,19 +679,32 @@ impl ConfigLoader {
                 }),
             ));
         }
-        self.register_key(KeySpec::new(
-            "limits.by_path",
-            "Path limit list",
-            Arc::new(|v| {
-                if v.as_sequence()
-                    .is_some_and(|items| items.iter().all(Value::is_mapping))
-                {
-                    Ok(())
-                } else {
-                    Err("expected list of mappings".into())
-                }
-            }),
-        ));
+        for path in ["limits.by_path", "limits.by_entity_glob"] {
+            self.register_key(KeySpec::new(
+                path,
+                "Ordered limit list",
+                Arc::new(|v| {
+                    if v.as_sequence()
+                        .is_some_and(|items| items.iter().all(Value::is_mapping))
+                    {
+                        Ok(())
+                    } else {
+                        Err("expected list of mappings".into())
+                    }
+                }),
+            ));
+            self.register_key(KeySpec::new(
+                format!("{path}.*"),
+                "Limit mapping",
+                Arc::new(|v| {
+                    if v.is_mapping() {
+                        Ok(())
+                    } else {
+                        Err("expected limit mapping".into())
+                    }
+                }),
+            ));
+        }
         self.register_key(KeySpec::new("external.rules", "External operation catalog", Arc::new(|v| {
             if v.as_sequence().is_some_and(|items| items.iter().all(|item| {
                 item.as_mapping().is_some_and(|map| ["category", "pattern", "library", "operation"]
@@ -762,6 +802,8 @@ impl ConfigLoader {
             "limits.by_language.*.*.error",
             "limits.by_path.*.*.warn",
             "limits.by_path.*.*.error",
+            "limits.by_entity_glob.*.*.warn",
+            "limits.by_entity_glob.*.*.error",
             "limits.by_entity.*.*.warn",
             "limits.by_entity.*.*.error",
             "limits.aggregates.*.warn",
@@ -790,6 +832,7 @@ impl ConfigLoader {
             "limits.*",
             "limits.by_language.*.*",
             "limits.by_path.*.*",
+            "limits.by_entity_glob.*.*",
             "limits.by_entity.*.*",
             "limits.aggregates.*",
         ] {
@@ -1273,15 +1316,32 @@ fn child_path(path: &str, name: &str) -> String {
 fn dependent_item_error(schema_path: &str, value: &Value) -> Option<String> {
     let map = value.as_mapping()?;
     let field = |name: &str| map.get(Value::String(name.into()));
-    if wildcard_match("algorithmic_complexity.by_path.*", schema_path) && field("glob").is_none() {
+    if wildcard_match("limits.by_entity_glob.*", schema_path) {
+        match field("glob").and_then(Value::as_str) {
+            Some(pattern) if !pattern.is_empty() => {
+                entity_glob(pattern).err().map(|e| e.to_string())
+            }
+            _ => Some("entity override requires a nonempty valid glob".into()),
+        }
+    } else if wildcard_match("algorithmic_complexity.by_path.*", schema_path)
+        && field("glob").is_none()
+    {
         Some("path override requires a valid glob".into())
-    } else if wildcard_match("architecture.layers.*", schema_path)
+    } else if (wildcard_match("architecture.layers.*", schema_path)
+        || wildcard_match("architecture.modules.*", schema_path))
         && (field("name").is_none()
             || !field("selectors")
                 .and_then(Value::as_sequence)
                 .is_some_and(|s| !s.is_empty()))
     {
-        Some("layer requires a nonempty name and selectors".into())
+        Some(
+            if schema_path.starts_with("architecture.modules.") {
+                "module requires a nonempty name and selectors"
+            } else {
+                "layer requires a nonempty name and selectors"
+            }
+            .into(),
+        )
     } else if wildcard_match("architecture.forbidden_dependencies.*", schema_path)
         && (field("from").is_none() || field("to").is_none())
     {
@@ -1291,6 +1351,32 @@ fn dependent_item_error(schema_path: &str, value: &Value) -> Option<String> {
     }
 }
 fn sanitize_architecture_relations(map: &mut Mapping, path: &str, state: &mut LoadState) {
+    if let Some(Value::Sequence(modules)) = map.get_mut(Value::String("modules".into())) {
+        let mut names = std::collections::BTreeSet::new();
+        let mut kept_indices = Vec::new();
+        let mut index = 0;
+        modules.retain(|module| {
+            let name = module
+                .as_mapping()
+                .unwrap()
+                .get(Value::String("name".into()))
+                .unwrap()
+                .as_str()
+                .unwrap();
+            let keep = names.insert(name.to_owned());
+            if keep {
+                kept_indices.push(index);
+            } else {
+                state.invalid(
+                    &format!("{path}.modules.{index}.name"),
+                    "module name must be unique",
+                );
+            }
+            index += 1;
+            keep
+        });
+        state.reindex_sequence(&format!("{path}.modules"), &kept_indices);
+    }
     let mut names = std::collections::BTreeSet::new();
     if let Some(Value::Sequence(layers)) = map.get_mut(Value::String("layers".into())) {
         let mut index = 0;
@@ -1532,8 +1618,11 @@ fn wildcard_match(pattern: &str, path: &str) -> bool {
 }
 fn metric_name_at<'a>(path: &str, name: &'a str, value: &Value) -> Option<&'a str> {
     if path == "limits" {
-        return (!matches!(name, "by_language" | "by_path" | "by_entity" | "aggregates"))
-            .then_some(name);
+        return (!matches!(
+            name,
+            "by_language" | "by_path" | "by_entity_glob" | "by_entity" | "aggregates"
+        ))
+        .then_some(name);
     }
     if path == "limits.aggregates" {
         return name.rsplit_once('.').and_then(|(metric, stat)| {
@@ -1543,7 +1632,7 @@ fn metric_name_at<'a>(path: &str, name: &'a str, value: &Value) -> Option<&'a st
     let parts = path.split('.').collect::<Vec<_>>();
     if parts.len() == 3
         && parts[0] == "limits"
-        && matches!(parts[1], "by_language" | "by_path")
+        && matches!(parts[1], "by_language" | "by_path" | "by_entity_glob")
         && name != "glob"
     {
         return Some(name);

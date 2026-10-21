@@ -75,6 +75,36 @@ pub fn scan_markdown(report: &AnalysisReport, only_violations: bool) -> String {
             if v.algorithmic_complexity.is_some() {
                 writeln!(out, "- {}\n", cell(&v.message())).unwrap();
             }
+            if let Some(d) = &v.module_cycle {
+                writeln!(out, "### Module dependency cycle · {:?}\n", v.severity).unwrap();
+                writeln!(out, "Modules: {}\n", cell(&d.participants.join(", "))).unwrap();
+                writeln!(out, "Closed path: {}\n", cell(&d.cycle.path.join(" → "))).unwrap();
+                writeln!(out, "Files in component:\n").unwrap();
+                for file in &d.files {
+                    writeln!(out, "- {}", cell(file)).unwrap();
+                }
+                writeln!(out, "\nDependency evidence:\n").unwrap();
+                for e in &d.evidence {
+                    writeln!(
+                        out,
+                        "- {}:{} — {}",
+                        cell(&e.range.file),
+                        e.range.start_line,
+                        cell(&e.description)
+                    )
+                    .unwrap();
+                }
+                if d.evidence_total > d.evidence.len() {
+                    writeln!(
+                        out,
+                        "- Evidence shown: {} / {}",
+                        d.evidence.len(),
+                        d.evidence_total
+                    )
+                    .unwrap();
+                }
+                out.push('\n');
+            }
         }
     }
     writeln!(out, "## Architecture\n").unwrap();

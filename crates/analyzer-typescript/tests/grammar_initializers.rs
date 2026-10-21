@@ -175,3 +175,34 @@ fn module_import_binding_resolves_initializer_call_across_files() {
     assert!(edges[0].to.ends_with("dep.each"));
     assert_eq!(edges[0].callsite.start_line, 2);
 }
+
+#[test]
+fn enum_and_namespace_initializers_keep_runtime_calls() {
+    let source = "enum E { X = initEnum() }\nnamespace N { initNamespace(); }\n";
+    for extension in ["ts", "tsx"] {
+        let name = format!("runtime.{extension}");
+        let file = TypeScript.analyze(source, Path::new(&name));
+        assert!(file.parse_errors.is_empty(), "{:?}", file.parse_errors);
+        let initializer = file
+            .functions
+            .iter()
+            .find(|f| f.is_module_initializer())
+            .unwrap();
+        assert_eq!(
+            initializer
+                .calls
+                .iter()
+                .map(|call| call.name.as_str())
+                .collect::<Vec<_>>(),
+            ["initEnum", "initNamespace"]
+        );
+        assert_eq!(
+            initializer
+                .calls
+                .iter()
+                .map(|call| call.range.start_line)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+    }
+}

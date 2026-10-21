@@ -32,7 +32,7 @@ pub trait LanguageStrategy: Send + Sync {
         }
         model
     }
-    /// Collect optional advisory facts without allocating a public detailed AST.
+    /// Collect optional dependency witnesses and advisory facts without a public detailed AST.
     fn analyze_with_architecture(&self, source: &str, path: &Path, _enabled: bool) -> FileModel {
         self.analyze(source, path)
     }
@@ -190,7 +190,7 @@ pub struct Analyzer {
     pub registry: LanguageRegistry,
     pub config: Config,
     pub metrics: crate::metrics::MetricRegistry,
-    /// Web exploration needs dependency witnesses even when advisory rules are disabled.
+    /// Also collect dependency witnesses for vendor and architecture-excluded files in Web exploration.
     pub collect_dependency_facts: bool,
 }
 

@@ -886,6 +886,163 @@ impl Drop for Fixture {
     }
 }
 #[test]
+fn disabling_advisory_architecture_preserves_numeric_value_access_cycles() {
+    for sources in [
+        [
+            ("a.php", "<?php namespace A; use B\\Right; class Left {const VALUE=1; function read(){return Right::VALUE;}}"),
+            ("b.php", "<?php namespace B; use A\\Left; class Right {const VALUE=1; function read(){return Left::VALUE;}}"),
+        ],
+        [
+            ("a.ts", "import {B} from './b'; export class A {value=0; run(b:B){return b.value;}}"),
+            ("b.ts", "import {A} from './a'; export class B {value=0; run(a:A){a.value=1;}}"),
+        ],
+    ] {
+        let fixture = Fixture::new();
+        for path in ["a.py", "b.py"] { std::fs::remove_file(fixture.0.join(path)).unwrap(); }
+        for (path, source) in sources { std::fs::write(fixture.0.join(path), source).unwrap(); }
+        std::fs::write(fixture.0.join("analyzer.yaml"), "limits:\n  module_cycle: {error: 0}\n").unwrap();
+        let enabled = fixture.scan(&["--format", "json"]);
+        assert_eq!(enabled.status.code(), Some(2));
+        let enabled: Value = serde_json::from_slice(&enabled.stdout).unwrap();
+        assert_eq!(enabled["violations"].as_array().unwrap().iter().filter(|v| v["rule"] == "module_cycle").count(), 1);
+        for cli_disabled in [true, false] {
+            let args = if cli_disabled {
+                vec!["--no-architecture", "--format", "json"]
+            } else {
+                std::fs::write(fixture.0.join("analyzer.yaml"), "architecture: {enabled: false}\nlimits:\n  module_cycle: {error: 0}\n").unwrap();
+                vec!["--format", "json"]
+            };
+            let output = fixture.scan(&args);
+            assert_eq!(output.status.code(), Some(2), "{}: {}", sources[0].0, String::from_utf8_lossy(&output.stderr));
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["summary"]["cache_hits"], 2);
+            let violations = report["violations"].as_array().unwrap();
+            assert!(!violations.iter().any(|v| v.get("architecture").is_some()));
+            let cycles = violations.iter().filter(|v| v["rule"] == "module_cycle").collect::<Vec<_>>();
+            assert_eq!(cycles.len(), 1, "{}", sources[0].0);
+            assert_eq!(cycles[0]["module_cycle"]["files"], serde_json::json!([sources[0].0, sources[1].0]));
+            assert!(cycles[0]["module_cycle"]["evidence"].as_array().unwrap().iter().all(|e| e["dependency"]["kind"] == "member_access"));
+            let metrics = report["metrics"].as_array().unwrap().iter().filter(|m| m["id"] == "module_cycle").collect::<Vec<_>>();
+            assert_eq!(metrics.len(), 2);
+            assert!(metrics.iter().all(|metric| metric["value"] == 1.0));
+        }
+    }
+}
+#[test]
+fn numeric_module_cycles_export_one_blocking_component_with_complete_membership() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.0.join("analyzer.yaml"), "cache: {enabled: false}\narchitecture: {enabled: false, max_evidence: 1}\nlimits:\n  module_cycle: {error: 0}\n").unwrap();
+    std::fs::write(
+        fixture.0.join("a.py"),
+        "from b import ping_b\ndef ping_a(): ping_b()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.0.join("b.py"),
+        "from c import ping_c\ndef ping_b(): ping_c()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.0.join("c.py"),
+        "from a import ping_a\ndef ping_c(): ping_a()\n",
+    )
+    .unwrap();
+    let output = fixture.scan(&["--format", "json"]);
+    assert_eq!(output.status.code(), Some(2));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let cycles = report["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|v| v["rule"] == "module_cycle")
+        .collect::<Vec<_>>();
+    assert_eq!(cycles.len(), 1);
+    let detail = &cycles[0]["module_cycle"];
+    assert_eq!(detail["files"], serde_json::json!(["a.py", "b.py", "c.py"]));
+    assert_eq!(detail["participants"].as_array().unwrap().len(), 3);
+    assert_eq!(detail["evidence"].as_array().unwrap().len(), 1);
+    assert!(detail["evidence_total"].as_u64().unwrap() >= 3);
+    assert!(cycles[0].get("architecture").is_none());
+    for (format, expected) in [
+        ("console", "Файлы компоненты:"),
+        ("md", "Files in component:"),
+    ] {
+        let output = fixture.scan(&["--format", format]);
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains(expected), "{text}");
+        assert!(text.contains("c.py"));
+    }
+    let output = fixture.scan(&["--format", "sarif"]);
+    let sarif: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let results = sarif["runs"][0]["results"].as_array().unwrap();
+    let cycle = results
+        .iter()
+        .find(|result| result["ruleId"] == "module_cycle")
+        .unwrap();
+    assert_eq!(cycle["level"], "error");
+    assert_eq!(cycle["relatedLocations"].as_array().unwrap().len(), 3);
+    assert!(cycle["properties"].get("non_blocking").is_none());
+    let (_server, port) = architecture_test_server(&fixture);
+    for file in ["a.py", "b.py", "c.py"] {
+        let result = web_get(port, &format!("/api/violations?file={file}&kind=metrics")).unwrap();
+        assert_eq!(result["total"], 1, "{file}: {result}");
+        let source = web_get(port, &format!("/api/file?id={file}")).unwrap();
+        assert_eq!(source["violation_count"], 1);
+        assert!(!source["violation_lines"].as_array().unwrap().is_empty());
+        let found = web_get(port, &format!("/api/violations?q={file}&kind=metrics")).unwrap();
+        assert_eq!(found["total"], 1);
+    }
+    let tree = web_get(port, "/api/tree").unwrap();
+    for file in ["a.py", "b.py", "c.py"] {
+        let node = tree["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["path"] == file)
+            .unwrap();
+        assert_eq!(node["violations"], 1);
+    }
+}
+#[test]
+fn overlapping_module_watch_update_retains_the_report_and_exposes_the_error() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.0.join("analyzer.yaml"), "cache: {enabled: false}\narchitecture:\n  modules:\n    - {name: first, selectors: ['glob:a*.py']}\n    - {name: second, selectors: ['glob:*b.py']}\n").unwrap();
+    let (_server, port) = architecture_path_server(&fixture.0, true);
+    let started = Instant::now();
+    let revision = loop {
+        let status = web_get(port, "/api/status").unwrap();
+        if status["revision"].as_u64().unwrap() > 0 {
+            break status["revision"].as_u64().unwrap();
+        }
+        assert!(started.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    std::fs::write(fixture.0.join("ab.py"), "def overlap(): pass\n").unwrap();
+    let started = Instant::now();
+    loop {
+        let status = web_get(port, "/api/status").unwrap();
+        if let Some(error) = status["watch_error"].as_str() {
+            assert!(error.contains("ab.py"), "{error}");
+            assert_eq!(status["revision"], revision);
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(web_get(port, "/api/tree").unwrap()["summary"]["files"], 2);
+    std::fs::remove_file(fixture.0.join("ab.py")).unwrap();
+    let started = Instant::now();
+    loop {
+        let status = web_get(port, "/api/status").unwrap();
+        if status["watch_error"].is_null() {
+            assert_eq!(status["revision"], revision);
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+#[test]
 fn architecture_is_nonblocking_exported_and_can_be_disabled() {
     let f = Fixture::new();
     let output = f.scan(&["--format", "json", "--fail-on-warn"]);
@@ -1104,10 +1261,10 @@ fn profiles_thresholds_and_cache_modes_are_independent() {
     assert!(disabled
         .files
         .iter()
-        .all(|f| f.architecture_facts.is_none()));
+        .all(|f| f.architecture_facts.is_some()));
     c.architecture.enabled = true;
     let cold = Analyzer::new(registry(), c.clone()).scan(&f.0).unwrap();
-    assert_eq!(cold.summary.cache_hits, 0);
+    assert_eq!(cold.summary.cache_hits, 2);
     assert!(cold.files.iter().all(|f| f.architecture_facts.is_some()));
     c.architecture.profile = Profile::Extended;
     let warm = Analyzer::new(registry(), c).scan(&f.0).unwrap();

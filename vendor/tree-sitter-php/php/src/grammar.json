@@ -6762,6 +6762,11 @@
                 },
                 {
                   "type": "PATTERN",
+                  "value": "list",
+                  "flags": "i"
+                },
+                {
+                  "type": "PATTERN",
                   "value": "namespace",
                   "flags": "i"
                 },

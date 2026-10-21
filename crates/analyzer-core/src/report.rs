@@ -134,8 +134,7 @@ pub fn scan_with_baseline(
                 f,
                 cache.as_ref(),
                 analyzer.collect_dependency_facts
-                    || (analyzer.config.architecture.enabled
-                        && !f.vendor
+                    || (!f.vendor
                         && !architecture_excludes
                             .iter()
                             .any(|m| m.is_match(&f.relative))),
@@ -170,7 +169,11 @@ pub fn scan_with_baseline(
         .collect();
     memory_trace("models");
     timings.mark("parse");
-    let resolution = crate::resolution::ResolutionContext::load(scan_base, &analyzer.config);
+    let resolution = crate::resolution::ResolutionContext::load_for_sources(
+        scan_base,
+        &analyzer.config,
+        files.iter().map(|file| file.path.as_str()),
+    );
     let parsed_files = files.len() - cache_hits;
     for path in strip_rust_test_modules(&mut files, &resolution, &analyzer.config) {
         text_facts.remove(&path);
@@ -186,6 +189,8 @@ pub fn scan_with_baseline(
             &files,
         );
     }
+    crate::architecture::validate_module_assignments(&files, &graph, &analyzer.config.architecture)
+        .map_err(AnalysisError::Config)?;
     memory_trace("graph");
     timings.mark("graph");
     crate::algorithmic::analyze(&mut files, &mut graph, &analyzer.config);
@@ -204,7 +209,7 @@ pub fn scan_with_baseline(
     for file in &files {
         metrics.extend(metric_registry.calculate(file, &analyzer.config));
     }
-    let mut advanced = crate::metrics::advanced_metrics_consuming_text_facts(
+    let (mut advanced, module_cycles) = crate::metrics::advanced_metrics_consuming_text_facts(
         &files,
         &graph,
         &analyzer.config.architecture,
@@ -231,6 +236,7 @@ pub fn scan_with_baseline(
         &baseline,
         &suppressions,
     );
+    crate::rules::group_module_cycle_violations(&mut violations, module_cycles, &baseline);
     let (mut architecture, architecture_violations) =
         crate::architecture::analyze(&files, &graph, &analyzer.config.architecture);
     violations.extend(
@@ -343,7 +349,15 @@ fn parse_one(
         analyzer,
         f,
         cache,
-        analyzer.collect_dependency_facts || (analyzer.config.architecture.enabled && !f.vendor),
+        analyzer.collect_dependency_facts
+            || (!f.vendor
+                && !analyzer
+                    .config
+                    .architecture
+                    .exclude
+                    .iter()
+                    .filter_map(|pattern| globset::Glob::new(pattern).ok())
+                    .any(|glob| glob.compile_matcher().is_match(&f.relative))),
     )
 }
 
@@ -422,7 +436,7 @@ fn parse_one_with_architecture(
         ],
         &f.language,
         &format!(
-            "core-ir-19:strategy-{}:architecture-v4-{}",
+            "core-ir-20:strategy-{}:architecture-v4-{}",
             strategy.version(),
             architecture_enabled
         ),
@@ -608,7 +622,11 @@ impl Analyzer {
         }
         report.files.sort_by(|a, b| a.path.cmp(&b.path));
         report.deferred_vendor.retain(|f| f.package != package);
-        let resolution = crate::resolution::ResolutionContext::load(&root, &self.config);
+        let resolution = crate::resolution::ResolutionContext::load_for_sources(
+            &root,
+            &self.config,
+            report.files.iter().map(|file| file.path.as_str()),
+        );
         report.graph =
             CallGraph::build_with_context(&report.files, &self.registry, &self.config, &resolution);
         report.resolution_diagnostics = resolution.report_diagnostics(&report.files, &self.config);
@@ -642,12 +660,18 @@ impl Analyzer {
             })
             .collect::<BTreeMap<_, _>>();
         let metric_registry = self.metrics.clone();
+        crate::architecture::validate_module_assignments(
+            &report.files,
+            &report.graph,
+            &self.config.architecture,
+        )
+        .map_err(AnalysisError::Config)?;
         report.metrics = report
             .files
             .iter()
             .flat_map(|file| metric_registry.calculate(file, &self.config))
             .collect();
-        let mut advanced = crate::metrics::advanced_metrics(
+        let (mut advanced, module_cycles) = crate::metrics::advanced_metrics_and_cycles(
             &report.files,
             &report.graph,
             &sources,
@@ -674,6 +698,11 @@ impl Analyzer {
             &self.config,
             &baseline,
             &sources,
+        );
+        crate::rules::group_module_cycle_violations(
+            &mut report.violations,
+            module_cycles,
+            &baseline,
         );
         let suppressions = crate::rules::Suppressions::from_files(&report.files, &sources);
         let (mut architecture, findings) =

@@ -8,3 +8,5 @@ analyzer-core = { path = "../analyzer-core" }
 analyzer-parser = { path = "../analyzer-parser" }
 tree-sitter-php = "0.24"
 
+[dev-dependencies]
+serde_json = "1"

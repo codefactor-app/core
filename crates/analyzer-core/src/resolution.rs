@@ -315,6 +315,16 @@ impl ResolutionContext {
         messages
     }
     pub fn load(root: &Path, config: &Config) -> Self {
+        Self::load_for_sources(root, config, std::iter::empty())
+    }
+
+    /// Load vendor compiler configurations only when they are needed by parsed
+    /// sources. Explicit project `extends` are always followed independently.
+    pub fn load_for_sources<'a>(
+        root: &Path,
+        config: &Config,
+        sources: impl IntoIterator<Item = &'a str>,
+    ) -> Self {
         let base = if root.is_file() {
             root.parent().unwrap_or(root)
         } else {
@@ -322,7 +332,29 @@ impl ResolutionContext {
         };
         let base = std::fs::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
         let mut context = Self::default();
-        let metadata = metadata_files(&base, config);
+        let mut metadata = metadata_files(&base, config);
+        let vendor = vendor_matchers(config);
+        for source in sources {
+            if !vendor.iter().any(|glob| glob.is_match(source)) {
+                continue;
+            }
+            let mut directory = Path::new(source).parent();
+            while let Some(parent) = directory {
+                let mut selected = false;
+                for name in ["tsconfig.json", "jsconfig.json"] {
+                    let path = base.join(parent).join(name);
+                    if path.is_file() && confined_relative(&base, &path).is_some() {
+                        metadata.insert(path);
+                        selected = true;
+                        break;
+                    }
+                }
+                if selected {
+                    break;
+                }
+                directory = parent.parent();
+            }
+        }
         let mut cargo = BTreeMap::new();
         let mut raw_ts = BTreeMap::new();
         for absolute in metadata {
@@ -657,10 +689,16 @@ fn load_tsconfig(
     let value = if let Some(value) = raw.get(path) {
         value.clone()
     } else {
-        let value = confined_relative(base, &absolute)
-            .and_then(|_| std::fs::read_to_string(&absolute).ok())
-            .and_then(|text| parse_jsonc(&text).ok())
-            .unwrap_or(Value::Null);
+        let value = match std::fs::read_to_string(&absolute) {
+            Ok(text) => parse_jsonc(&text).unwrap_or_else(|error| {
+                context.diagnostics.push(format!("{path}: {error}"));
+                Value::Null
+            }),
+            Err(error) => {
+                context.diagnostics.push(format!("{path}: {error}"));
+                Value::Null
+            }
+        };
         raw.insert(path.into(), value.clone());
         value
     };
@@ -834,8 +872,21 @@ fn resolve_tsconfig_parent(
     None
 }
 
-/// Enumerate metadata separately from source-language discovery, including
-/// ignored dependency roots. Used by both the loader and the watch snapshot.
+fn vendor_matchers(config: &Config) -> Vec<globset::GlobMatcher> {
+    config
+        .vendor
+        .paths
+        .iter()
+        .filter_map(|pattern| {
+            globset::Glob::new(pattern)
+                .ok()
+                .map(|glob| glob.compile_matcher())
+        })
+        .collect()
+}
+
+/// Enumerate package metadata, including ignored dependency roots, and project
+/// compiler configurations. Vendor compiler configurations are loaded on demand.
 pub fn metadata_files(root: &Path, config: &Config) -> BTreeSet<PathBuf> {
     let base = if root.is_file() {
         root.parent().unwrap_or(root)
@@ -856,6 +907,7 @@ pub fn metadata_files(root: &Path, config: &Config) -> BTreeSet<PathBuf> {
         });
     }
     let mut files = BTreeSet::new();
+    let vendor = vendor_matchers(config);
     for (index, start) in starts.into_iter().enumerate() {
         let mut walker = ignore::WalkBuilder::new(start);
         walker
@@ -877,7 +929,14 @@ pub fn metadata_files(root: &Path, config: &Config) -> BTreeSet<PathBuf> {
                     Some("package.json" | "tsconfig.json" | "jsconfig.json" | "Cargo.toml")
                 )
             {
-                if confined_relative(base, entry.path()).is_some() {
+                if let Some(relative) = confined_relative(base, entry.path()) {
+                    if matches!(
+                        entry.file_name().to_str(),
+                        Some("tsconfig.json" | "jsconfig.json")
+                    ) && vendor.iter().any(|glob| glob.is_match(&relative))
+                    {
+                        continue;
+                    }
                     files.insert(entry.path().to_path_buf());
                 }
             }

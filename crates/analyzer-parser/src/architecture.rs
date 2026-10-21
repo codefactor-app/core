@@ -801,6 +801,18 @@ fn value_access(
     ) {
         return None;
     }
+    // Bare names can only be import witnesses. Reject ordinary locals before
+    // walking their ancestors: deep expressions may contain thousands of them.
+    if matches!(n.kind(), "identifier" | "name" | "variable_name") {
+        let raw = snippet(n, source).trim_start_matches('$');
+        if !model
+            .imports
+            .iter()
+            .any(|import| !import.type_only && analyzer_core::scoped_imports::alias(import) == raw)
+        {
+            return None;
+        }
+    }
     if !value_context(n, dialect) {
         return None;
     }
@@ -1260,8 +1272,8 @@ fn canonical(
     let mut renamed = false;
     let mut tokens = 0;
     let mut statements = 0;
-    let mut stack = vec![(n, false, false)];
-    while let Some((c, exit, parent_opaque)) = stack.pop() {
+    let mut stack = vec![(n, false, false, n.parent())];
+    while let Some((c, exit, parent_opaque, parent)) = stack.pop() {
         // Python's indentation does not appear among syntax leaves. Keep explicit block boundaries.
         if exit {
             out.push_str("@end;");
@@ -1301,13 +1313,13 @@ fn canonical(
                         && c.kind().ends_with("statement"))
             {
                 write!(out, "@{};", c.kind()).unwrap();
-                stack.push((c, true, opaque));
+                stack.push((c, true, opaque, parent));
             }
             stack.extend(
                 all_children(c)
                     .into_iter()
                     .rev()
-                    .map(|c| (c, false, opaque)),
+                    .map(|child| (child, false, opaque, Some(c))),
             );
             continue;
         }
@@ -1318,7 +1330,7 @@ fn canonical(
         let text = snippet(c, source);
         let mut normalized = None;
         if atomic && matches!(c.kind(), "identifier" | "variable_name") {
-            let property = c.parent().is_some_and(|p| {
+            let property = parent.is_some_and(|p| {
                 member(p, dialect).is_some_and(|(_, field)| field.id() == c.id())
                     || ["key", "type", "label"]
                         .iter()

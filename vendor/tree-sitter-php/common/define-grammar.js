@@ -1288,6 +1288,7 @@ module.exports = function defineGrammar(dialect) {
             keyword('fn', false),
             keyword('function', false),
             keyword('match', false),
+            keyword('list', false),
             keyword('namespace', false),
             keyword('null', false),
             keyword('static', false),

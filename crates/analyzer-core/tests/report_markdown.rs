@@ -151,6 +151,7 @@ fn fixture() -> (AnalysisReport, GraphQuery) {
         limit: Some(2.0),
         scope: "function".into(),
         architecture: None,
+        module_cycle: None,
         algorithmic_complexity: None,
     };
     let distribution = Distribution {

@@ -13,7 +13,6 @@ mod rust_types;
 mod static_js;
 mod types;
 use analyzer_core::ir::*;
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
@@ -600,9 +599,8 @@ fn ast_kind(kind: &str, dialect: Dialect) -> AstKind {
         AstKind::Other(kind.into())
     }
 }
-// Recursive body helpers and owned AST serialization have finite stack budgets.
-// Inspect with an explicit stack before entering those paths; structural collection
-// and syntax diagnostics themselves support arbitrary tree depth.
+// Detailed owned ASTs and optional cost inference have finite recursive stack
+// budgets. Normal metric and binding traversal uses explicit work stacks.
 const MAX_RECURSIVE_DEPTH: usize = 256;
 fn exceeds_recursive_depth(node: Node<'_>) -> bool {
     let mut pending = vec![(node, 0usize)];
@@ -810,7 +808,7 @@ struct State<'a> {
 
 impl State<'_> {
     fn add_module_initializer(&mut self, root: Node<'_>) {
-        if self.dialect == Dialect::Rust || exceeds_recursive_depth(root) {
+        if self.dialect == Dialect::Rust {
             return;
         }
         for (owner, nodes) in self.module_regions(root) {
@@ -2142,26 +2140,29 @@ impl State<'_> {
         if self.dialect == Dialect::Php {
             apply_phpdoc(node, self.source, &mut function);
         }
-        if exceeds_recursive_depth(body_node) {
-            self.model.parse_errors.push(ParseError {
-                message: format!("analysis incomplete: function {fqn} body exceeds supported depth {MAX_RECURSIVE_DEPTH}; function omitted"),
-                range: range(body_node, self.path),
-            });
-            return fqn;
-        }
         self.walk_body(body_node, &mut function, &[], &[], 0);
         function.cognitive_complexity =
             Some(cognitive_complexity(body_node, self.source, self.dialect));
-        if self.dialect == Dialect::Rust {
-            function.cost_ir = Some(Arc::new(cost::extract(
+        // Cost inference still uses recursive expression evaluators. Bound this
+        // optional representation before entering any of them; normal metrics,
+        // runtime operations and bindings remain complete for deep bodies.
+        function.cost_ir = Some(Arc::new(if exceeds_recursive_depth(body_node) {
+            analyzer_core::algorithmic::CostNode {
+                range: range(body_node, self.path),
+                kind: analyzer_core::algorithmic::CostKind::Unknown(
+                    "cost extraction depth limit exceeded".into(),
+                ),
+            }
+        } else if self.dialect == Dialect::Rust {
+            cost::extract(
                 body_node,
                 &function,
                 self.source,
                 self.path,
                 &self.cost_type_shadows,
-            )));
+            )
         } else {
-            function.cost_ir = Some(Arc::new(cost_dynamic::extract(
+            cost_dynamic::extract(
                 body_node,
                 &function,
                 self.source,
@@ -2169,8 +2170,8 @@ impl State<'_> {
                 self.dialect,
                 &self.cost_type_shadows,
                 !self.namespace.is_empty(),
-            )));
-        }
+            )
+        }));
         let mut fields = BTreeSet::new();
         collect_accessed_fields(
             body_node,
@@ -2284,139 +2285,178 @@ impl State<'_> {
         loops: &[LoopContext],
         depth: usize,
     ) {
-        if function.is_module_initializer() {
+        // Resume sibling traversal after each child, retaining source order and
+        // the early-exit guards inherited only by subsequent siblings. Contexts
+        // are shared so expression depth does not clone branch environments.
+        enum Work<'tree> {
+            Enter(Node<'tree>, Arc<[Guard]>, Arc<[LoopContext]>, usize),
+            Children {
+                node: Node<'tree>,
+                children: std::vec::IntoIter<Node<'tree>>,
+                guards: Arc<[Guard]>,
+                loops: Arc<[LoopContext]>,
+                depth: usize,
+            },
+        }
+        let mut pending = vec![Work::Enter(node, guards.into(), loops.into(), depth)];
+        while let Some(work) = pending.pop() {
+            let (node, mut children, mut tail_guards, loops, depth) = match work {
+                Work::Enter(node, guards, loops, depth) => {
+                    let kind = node.kind();
+                    if function.is_module_initializer() {
+                        let runtime = if is_function(kind, self.dialect) {
+                            if self.dialect == Dialect::Python {
+                                [child(node, "parameters"), child(node, "return_type")]
+                                    .into_iter()
+                                    .flatten()
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            }
+                        } else if matches!(
+                            kind,
+                            "import_statement"
+                                | "import_require_clause"
+                                | "type_annotation"
+                                | "type_query"
+                                | "type_alias_declaration"
+                                | "interface_declaration"
+                                | "ambient_declaration"
+                                | "function_type"
+                                | "constructor_type"
+                        ) || (self.dialect == Dialect::Php && is_type(kind, self.dialect))
+                        {
+                            Vec::new()
+                        } else if self.dialect == Dialect::Python && kind == "class_definition" {
+                            [child(node, "superclasses"), child(node, "body")]
+                                .into_iter()
+                                .flatten()
+                                .collect()
+                        } else if matches!(
+                            kind,
+                            "class" | "class_declaration" | "abstract_class_declaration"
+                        ) {
+                            self.module_class_runtime_nodes(node)
+                        } else {
+                            if self.dialect == Dialect::Python && kind == "decorator" {
+                                if let Some(expression) = named_children(node).first().copied() {
+                                    let raw = snippet(expression, self.source);
+                                    let (receiver, name, call_kind) =
+                                        split_call(raw, "call", self.dialect);
+                                    let factory = is_call(expression.kind(), self.dialect);
+                                    function.calls.push(CallSite {
+                                        name: if factory {
+                                            "<decorator_result>".into()
+                                        } else {
+                                            name
+                                        },
+                                        receiver: if factory { None } else { receiver },
+                                        kind: if factory {
+                                            CallKind::Dynamic
+                                        } else {
+                                            call_kind
+                                        },
+                                        binding_unknown: factory,
+                                        range: range(expression, self.path),
+                                        guard: guards.clone(),
+                                        in_loop: loops.clone(),
+                                        ..Default::default()
+                                    });
+                                }
+                            }
+                            // Ordinary nodes are handled below.
+                            Vec::new()
+                        };
+                        if is_function(kind, self.dialect)
+                            || (self.dialect == Dialect::Php && is_type(kind, self.dialect))
+                            || (self.dialect == Dialect::Python && kind == "class_definition")
+                            || matches!(
+                                kind,
+                                "import_statement"
+                                    | "import_require_clause"
+                                    | "type_annotation"
+                                    | "type_query"
+                                    | "type_alias_declaration"
+                                    | "interface_declaration"
+                                    | "ambient_declaration"
+                                    | "function_type"
+                                    | "constructor_type"
+                                    | "class"
+                                    | "class_declaration"
+                                    | "abstract_class_declaration"
+                            )
+                        {
+                            pending.extend(runtime.into_iter().rev().map(|node| {
+                                Work::Enter(node, guards.clone(), loops.clone(), depth)
+                            }));
+                            continue;
+                        }
+                    }
+                    if node.id() != function.body_range.start_line as usize
+                        && is_function(kind, self.dialect)
+                        && node.start_position().row + 1 != function.range.start_line
+                    {
+                        continue;
+                    }
+                    if ["return_statement", "return_expression"].contains(&kind) {
+                        function.return_points += 1;
+                    }
+                    if is_call(kind, self.dialect) {
+                        function.calls.push(self.call_site(node, &guards, &loops));
+                    }
+                    if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript) {
+                        function.property_accesses.extend(properties::collect(
+                            node,
+                            self.source,
+                            self.path,
+                            &guards,
+                            &loops,
+                        ));
+                        function.property_mutations.extend(properties::mutations(
+                            node,
+                            self.source,
+                            self.path,
+                            &guards,
+                            &loops,
+                        ));
+                    }
+                    function.nesting_depth = function.nesting_depth.max(depth);
+                    if branch_complexity(kind) || is_logical_binary(node, self.source) {
+                        function.complexity += 1;
+                    }
+                    (node, named_children(node).into_iter(), guards, loops, depth)
+                }
+                Work::Children {
+                    node,
+                    children,
+                    guards,
+                    loops,
+                    depth,
+                } => (node, children, guards, loops, depth),
+            };
+            let Some(c) = children.next() else { continue };
             let kind = node.kind();
-            if is_function(kind, self.dialect) {
-                if self.dialect == Dialect::Python {
-                    if let Some(parameters) = child(node, "parameters") {
-                        self.walk_body(parameters, function, guards, loops, depth);
-                    }
-                    if let Some(annotation) = child(node, "return_type") {
-                        self.walk_body(annotation, function, guards, loops, depth);
-                    }
-                }
-                return;
-            }
-            if matches!(
-                kind,
-                "import_statement"
-                    | "import_require_clause"
-                    | "type_annotation"
-                    | "type_query"
-                    | "type_alias_declaration"
-                    | "interface_declaration"
-                    | "ambient_declaration"
-                    | "function_type"
-                    | "constructor_type"
-            ) {
-                return;
-            }
-            if self.dialect == Dialect::Python && kind == "decorator" {
-                if let Some(expression) = named_children(node).first().copied() {
-                    let raw = snippet(expression, self.source);
-                    let (receiver, name, call_kind) = split_call(raw, "call", self.dialect);
-                    let factory = is_call(expression.kind(), self.dialect);
-                    function.calls.push(CallSite {
-                        name: if factory {
-                            "<decorator_result>".into()
-                        } else {
-                            name
-                        },
-                        receiver: if factory { None } else { receiver },
-                        kind: if factory {
-                            CallKind::Dynamic
-                        } else {
-                            call_kind
-                        },
-                        binding_unknown: factory,
-                        range: range(expression, self.path),
-                        guard: guards.to_vec().into(),
-                        in_loop: loops.to_vec().into(),
-                        ..Default::default()
-                    });
-                }
-            }
-            if self.dialect == Dialect::Python && kind == "class_definition" {
-                if let Some(bases) = child(node, "superclasses") {
-                    self.walk_body(bases, function, guards, loops, depth);
-                }
-                if let Some(body) = child(node, "body") {
-                    self.walk_body(body, function, guards, loops, depth);
-                }
-                return;
-            }
-            if self.dialect == Dialect::Php && is_type(kind, self.dialect) {
-                // PHP method bodies and constant property defaults do not run
-                // when a named class declaration is loaded.
-                return;
-            }
-            if matches!(
-                kind,
-                "class" | "class_declaration" | "abstract_class_declaration"
-            ) {
-                self.walk_module_class_runtime(node, function, guards, loops, depth);
-                return;
-            }
-        }
-        if node.id() != function.body_range.start_line as usize
-            && is_function(node.kind(), self.dialect)
-            && node.start_position().row + 1 != function.range.start_line
-        {
-            return;
-        }
-        let kind = node.kind();
-        if kind.contains("return") && ["return_statement", "return_expression"].contains(&kind) {
-            function.return_points += 1;
-        }
-        if is_call(kind, self.dialect) {
-            function.calls.push(self.call_site(node, guards, loops));
-        }
-        if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript) {
-            function.property_accesses.extend(properties::collect(
-                node,
-                self.source,
-                self.path,
-                guards,
-                loops,
-            ));
-            function.property_mutations.extend(properties::mutations(
-                node,
-                self.source,
-                self.path,
-                guards,
-                loops,
-            ));
-        }
-        let mut max_depth = depth;
-        let mut tail_guards = Cow::Borrowed(guards);
-        let mut cursor = node.walk();
-        for c in node.named_children(&mut cursor) {
             if c.id() != node.id() && is_function(c.kind(), self.dialect) {
+                pending.push(Work::Children {
+                    node,
+                    children,
+                    guards: tail_guards.clone(),
+                    loops: loops.clone(),
+                    depth,
+                });
                 if function.is_module_initializer() && self.dialect == Dialect::Python {
-                    self.walk_body(c, function, tail_guards.as_ref(), loops, depth);
-                }
-                if function.is_module_initializer()
+                    pending.push(Work::Enter(c, tail_guards, loops, depth));
+                } else if function.is_module_initializer()
                     && c.kind() == "method_definition"
-                    && node.kind() == "object"
+                    && kind == "object"
                 {
                     if let Some(key) =
                         child(c, "name").filter(|key| key.kind() == "computed_property_name")
                     {
-                        self.walk_body(key, function, tail_guards.as_ref(), loops, depth);
+                        pending.push(Work::Enter(key, tail_guards, loops, depth));
                     }
                 }
                 continue;
-            }
-            let mut g = Cow::Borrowed(tail_guards.as_ref());
-            let mut l = Cow::Borrowed(loops);
-            let mut d = depth;
-            if is_loop(kind) {
-                l.to_mut().push(LoopContext {
-                    header: loop_header(node, self.source),
-                    line: node.start_position().row + 1,
-                    range: range(node, self.path),
-                });
-                d += 1;
             }
             if [
                 "list_comprehension",
@@ -2427,10 +2467,28 @@ impl State<'_> {
             .contains(&kind)
                 && c.kind() == "if_clause"
             {
+                pending.push(Work::Children {
+                    node,
+                    children,
+                    guards: tail_guards,
+                    loops,
+                    depth,
+                });
                 continue;
             }
-            // Python's elif/else clauses are siblings in the if statement.
-            // Every later branch excludes all preceding elif conditions.
+            let mut g = tail_guards.clone();
+            let mut l = loops.clone();
+            let mut d = depth;
+            if is_loop(kind) {
+                let mut contexts = l.to_vec();
+                contexts.push(LoopContext {
+                    header: loop_header(node, self.source),
+                    line: node.start_position().row + 1,
+                    range: range(node, self.path),
+                });
+                l = contexts.into();
+                d += 1;
+            }
             if kind == "if_statement"
                 && self.dialect == Dialect::Python
                 && matches!(c.kind(), "elif_clause" | "else_clause")
@@ -2445,14 +2503,18 @@ impl State<'_> {
                             let mut guard =
                                 make_guard("If", raw, "else", range(previous, self.path));
                             guard.normalized = negate_condition(raw);
-                            g.to_mut().push(guard);
+                            let mut contexts = g.to_vec();
+                            contexts.push(guard);
+                            g = contexts.into();
                         }
                     }
                 }
             }
             if is_branch(kind) {
                 if let Some(guard) = self.guard_for(node, c) {
-                    g.to_mut().insert(tail_guards.len(), guard);
+                    let mut contexts = g.to_vec();
+                    contexts.insert(tail_guards.len(), guard);
+                    g = contexts.into();
                     d += 1;
                 }
             }
@@ -2460,13 +2522,11 @@ impl State<'_> {
                 if let Some(guard) =
                     properties::logical_assignment_guard(node, c, self.source, self.path)
                 {
-                    g.to_mut().push(guard);
+                    let mut contexts = g.to_vec();
+                    contexts.push(guard);
+                    g = contexts.into();
                 }
             }
-            if d > max_depth {
-                max_depth = d;
-            }
-            self.walk_body(c, function, g.as_ref(), l.as_ref(), d);
             if [
                 "block",
                 "statement_block",
@@ -2487,7 +2547,9 @@ impl State<'_> {
                             let mut guard =
                                 make_guard("EarlyExit", raw, "after_exit", range(c, self.path));
                             guard.normalized = negate_condition(raw);
-                            tail_guards.to_mut().push(guard);
+                            let mut contexts = tail_guards.to_vec();
+                            contexts.push(guard);
+                            tail_guards = contexts.into();
                         }
                     }
                 }
@@ -2502,57 +2564,54 @@ impl State<'_> {
             {
                 if let Some(try_node) = find_unconditional_try(c) {
                     let raw = snippet(try_node, self.source).trim();
-                    tail_guards.to_mut().push(make_guard(
+                    let mut contexts = tail_guards.to_vec();
+                    contexts.push(make_guard(
                         "ShortCircuit",
                         raw,
                         "success",
                         range(try_node, self.path),
                     ));
+                    tail_guards = contexts.into();
                 }
             }
-        }
-        function.nesting_depth = function.nesting_depth.max(max_depth);
-        if branch_complexity(kind) || is_logical_binary(node, self.source) {
-            function.complexity += 1;
+            pending.push(Work::Children {
+                node,
+                children,
+                guards: tail_guards,
+                loops,
+                depth,
+            });
+            pending.push(Work::Enter(c, g, l, d));
         }
     }
 
-    fn walk_module_class_runtime(
-        &mut self,
-        node: Node<'_>,
-        function: &mut FunctionModel,
-        guards: &[Guard],
-        loops: &[LoopContext],
-        depth: usize,
-    ) {
+    fn module_class_runtime_nodes<'tree>(&self, node: Node<'tree>) -> Vec<Node<'tree>> {
+        let mut nodes = Vec::new();
         for child_node in named_children(node) {
             if matches!(
                 child_node.kind(),
                 "class_heritage" | "extends_clause" | "decorator"
             ) {
-                self.walk_body(child_node, function, guards, loops, depth);
+                nodes.push(child_node);
             }
         }
         let Some(body) = child(node, "body") else {
-            return;
+            return nodes;
         };
         for member in named_children(body) {
-            // Computed keys are evaluated for both instance and static members
-            // when the class is defined. Instance field values wait for `new`.
             if let Some(key) = child(member, "name")
                 .or_else(|| child(member, "property"))
                 .filter(|key| key.kind() == "computed_property_name")
             {
-                self.walk_body(key, function, guards, loops, depth);
+                nodes.push(key);
             }
-            for decorator in named_children(member)
-                .into_iter()
-                .filter(|node| node.kind() == "decorator")
-            {
-                self.walk_body(decorator, function, guards, loops, depth);
-            }
+            nodes.extend(
+                named_children(member)
+                    .into_iter()
+                    .filter(|node| node.kind() == "decorator"),
+            );
             if member.kind() == "class_static_block" {
-                self.walk_body(member, function, guards, loops, depth);
+                nodes.push(member);
             } else if matches!(
                 member.kind(),
                 "field_definition" | "public_field_definition"
@@ -2561,10 +2620,11 @@ impl State<'_> {
                 .any(|modifier| modifier == "static")
             {
                 if let Some(value) = child(member, "value") {
-                    self.walk_body(value, function, guards, loops, depth);
+                    nodes.push(value);
                 }
             }
         }
+        nodes
     }
     fn guard_for(&self, parent: Node<'_>, child_node: Node<'_>) -> Option<Guard> {
         let kind = parent.kind();
@@ -3110,60 +3170,62 @@ fn make_guard(kind: &str, raw: &str, branch: &str, range: SourceRange) -> Guard 
         range,
     }
 }
-fn contains_terminator(node: Node<'_>) -> bool {
-    if [
-        "return_statement",
-        "return_expression",
-        "throw_statement",
-        "raise_statement",
-        "continue_statement",
-        "break_statement",
-    ]
-    .contains(&node.kind())
-    {
-        return true;
+fn contains_terminator(mut node: Node<'_>) -> bool {
+    loop {
+        if [
+            "return_statement",
+            "return_expression",
+            "throw_statement",
+            "raise_statement",
+            "continue_statement",
+            "break_statement",
+        ]
+        .contains(&node.kind())
+        {
+            return true;
+        }
+        if !["block", "statement_block", "compound_statement"].contains(&node.kind()) {
+            return false;
+        }
+        let Some(last) = named_children(node).last().copied() else {
+            return false;
+        };
+        node = last;
     }
-    if ["block", "statement_block", "compound_statement"].contains(&node.kind()) {
-        return named_children(node)
-            .last()
-            .copied()
-            .is_some_and(contains_terminator);
-    }
-    false
 }
 // A fallible expression inside a branch, loop, or closure need not execute.
 // Do not impose its success condition on subsequent sibling statements.
 fn find_unconditional_try(node: Node<'_>) -> Option<Node<'_>> {
-    if node.kind() == "try_expression" {
-        return Some(node);
+    let mut pending = vec![node];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "try_expression" {
+            return Some(node);
+        }
+        if is_branch(node.kind())
+            || is_loop(node.kind())
+            || [
+                Dialect::Python,
+                Dialect::JavaScript,
+                Dialect::TypeScript,
+                Dialect::Php,
+                Dialect::Rust,
+            ]
+            .into_iter()
+            .any(|dialect| is_function(node.kind(), dialect))
+        {
+            continue;
+        }
+        pending.extend(named_children(node).into_iter().rev());
     }
-    if is_branch(node.kind())
-        || is_loop(node.kind())
-        || [
-            Dialect::Python,
-            Dialect::JavaScript,
-            Dialect::TypeScript,
-            Dialect::Php,
-            Dialect::Rust,
-        ]
-        .into_iter()
-        .any(|dialect| is_function(node.kind(), dialect))
-    {
-        return None;
-    }
-    named_children(node)
-        .into_iter()
-        .find_map(find_unconditional_try)
+    None
 }
 fn find_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
-    if node.kind() == kind {
-        return Some(node);
-    }
-    let mut children_cursor = node.walk();
-    for c in node.named_children(&mut children_cursor) {
-        if let Some(found) = find_kind(c, kind) {
-            return Some(found);
+    let mut pending = vec![node];
+    while let Some(node) = pending.pop() {
+        if node.kind() == kind {
+            return Some(node);
         }
+        pending.extend(named_children(node).into_iter().rev());
     }
     None
 }
@@ -4008,32 +4070,34 @@ fn collect_accessed_fields(
     receivers: &[&str],
     fields: &mut BTreeSet<String>,
 ) {
-    let kind = node.kind();
-    let (object, field) = match (dialect, kind) {
-        (Dialect::Python, "attribute") => (child(node, "object"), child(node, "attribute")),
-        (Dialect::JavaScript | Dialect::TypeScript, "member_expression") => {
-            (child(node, "object"), child(node, "property"))
-        }
-        (Dialect::Php, "member_access_expression" | "nullsafe_member_access_expression") => {
-            (child(node, "object"), child(node, "name"))
-        }
-        (Dialect::Rust, "field_expression") => (child(node, "value"), child(node, "field")),
-        _ => (None, None),
-    };
-    if let (Some(object), Some(field)) = (object, field) {
-        let receiver = snippet(object, source).trim();
-        if receivers.contains(&receiver.trim_start_matches('$')) {
-            let name = snippet(field, source).trim();
-            if !name.is_empty() {
-                fields.insert(name.into());
+    let mut pending = vec![node];
+    while let Some(node) = pending.pop() {
+        let kind = node.kind();
+        let (object, field) = match (dialect, kind) {
+            (Dialect::Python, "attribute") => (child(node, "object"), child(node, "attribute")),
+            (Dialect::JavaScript | Dialect::TypeScript, "member_expression") => {
+                (child(node, "object"), child(node, "property"))
+            }
+            (Dialect::Php, "member_access_expression" | "nullsafe_member_access_expression") => {
+                (child(node, "object"), child(node, "name"))
+            }
+            (Dialect::Rust, "field_expression") => (child(node, "value"), child(node, "field")),
+            _ => (None, None),
+        };
+        if let (Some(object), Some(field)) = (object, field) {
+            let receiver = snippet(object, source).trim();
+            if receivers.contains(&receiver.trim_start_matches('$')) {
+                let name = snippet(field, source).trim();
+                if !name.is_empty() {
+                    fields.insert(name.into());
+                }
             }
         }
-    }
-    let mut children_cursor = node.walk();
-    for c in node.named_children(&mut children_cursor) {
-        if !is_function(c.kind(), dialect) {
-            collect_accessed_fields(c, source, dialect, receivers, fields)
-        }
+        pending.extend(
+            named_children(node)
+                .into_iter()
+                .filter(|c| !is_function(c.kind(), dialect)),
+        );
     }
 }
 

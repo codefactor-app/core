@@ -1,4 +1,5 @@
 use super::graph::{components, is_abstract, selector_matches, witness, Symbols};
+use super::grouping::ModuleAssignments;
 use super::*;
 use crate::graph::{CallGraph, NodeKind};
 use sha2::{Digest, Sha256};
@@ -8,13 +9,8 @@ pub(super) fn module_key(file: &FileModel) -> String {
 }
 pub(super) fn module_graph(
     deps: &[Dependency],
-    symbols: &Symbols<'_>,
+    keys: &ModuleAssignments,
 ) -> BTreeMap<String, BTreeSet<String>> {
-    let keys = symbols
-        .files
-        .iter()
-        .map(|(path, file)| (*path, module_key(file)))
-        .collect::<BTreeMap<_, _>>();
     let mut edges = BTreeMap::<_, BTreeSet<_>>::new();
     for d in deps {
         let a = &keys[d.from];
@@ -41,18 +37,14 @@ pub(super) fn runtime_dependencies<'a>(deps: &[Dependency<'a>]) -> Vec<Dependenc
 }
 pub(super) fn cycles(
     deps: &[Dependency],
-    symbols: &Symbols<'_>,
+    _symbols: &Symbols<'_>,
+    keys: &ModuleAssignments,
     config: &ArchitectureConfig,
     out: &mut Vec<Violation>,
 ) {
     let runtime = runtime_dependencies(deps);
     let deps = runtime.as_slice();
-    let edges = module_graph(deps, symbols);
-    let keys = symbols
-        .files
-        .iter()
-        .map(|(path, file)| (*path, module_key(file)))
-        .collect::<BTreeMap<_, _>>();
+    let edges = module_graph(deps, keys);
     let groups = components(&edges)
         .into_iter()
         .filter(|g| g.len() > 1)
@@ -69,7 +61,11 @@ pub(super) fn cycles(
     // the original dependency order, independent of randomized map iteration.
     let file_components = keys
         .iter()
-        .filter_map(|(file, module)| membership.get(module.as_str()).map(|index| (*file, *index)))
+        .filter_map(|(file, module)| {
+            membership
+                .get(module.as_str())
+                .map(|index| (file.as_str(), *index))
+        })
         .collect::<std::collections::HashMap<_, _>>();
     let mut by_pair = BTreeMap::new();
     let mut participant_edges = vec![Vec::new(); groups.len()];
@@ -139,16 +135,20 @@ pub(super) fn cycles(
             .collect::<BTreeSet<_>>()
             .len();
         let php = group.iter().all(|m| m.starts_with("php:"));
-        let unit = if php {
+        let unit = if !config.modules.is_empty() {
+            "настроенных групп модулей"
+        } else if php {
             "PHP namespace"
         } else {
             "модулей"
         };
         let mut assessment = "Замкнутый путь подтверждён вызовами и обращениями к свойствам или переменным. Импорты, атрибуты, аннотации, наследование и ссылки на типы сами по себе не образуют этот цикл. Разрыв нужен, если участники задуманы как независимые компоненты.".to_string();
         if config.layers.is_empty() || config.forbidden_dependencies.is_empty() {
-            assessment.push_str(
-                " Границы независимых компонентов не заданы; нарушение границы не установлено.",
-            );
+            assessment.push_str(if config.modules.is_empty() {
+                " Границы независимых компонентов не заданы; нарушение границы не установлено."
+            } else {
+                " Запрещённые направления зависимостей не заданы; нарушение границы не установлено."
+            });
         } else {
             assessment.push_str(
                 " Нарушения заданных границ проверяются отдельно правилом arch_boundary.",
@@ -176,7 +176,7 @@ pub(super) fn cycles(
         diagnostic.cycle = Some(CycleDetails { path, coupling });
         diagnostic.limitations = vec![
             "Анализ охватывает разрешённые статические зависимости выбранных файлов; динамическая загрузка и внешние потребители не проверены.".into(),
-            if php { "Участники сгруппированы по PHP namespace; namespace не обязательно является отдельным архитектурным компонентом." } else { "Модуль языка не обязательно является отдельным архитектурным компонентом." }.into(),
+            if !config.modules.is_empty() { "Участники сгруппированы по настроенным группам модулей; непокрытые файлы сохраняют исходные модули языка. Настроенная группа не обязательно является независимым архитектурным компонентом." } else if php { "Участники сгруппированы по PHP namespace; namespace не обязательно является отдельным архитектурным компонентом." } else { "Модуль языка не обязательно является отдельным архитектурным компонентом." }.into(),
         ];
     }
 }
@@ -187,9 +187,9 @@ fn dependency_rank(kind: &str) -> u8 {
         _ => 0,
     }
 }
-fn dependency_evidence(
+pub(super) fn dependency_evidence(
     d: &Dependency<'_>,
-    keys: &BTreeMap<&str, String>,
+    keys: &ModuleAssignments,
     related: bool,
 ) -> Evidence {
     Evidence {
@@ -1329,11 +1329,11 @@ pub(super) fn demeter(
 }
 pub(super) fn stability(
     deps: &[Dependency],
-    symbols: &Symbols<'_>,
+    keys: &ModuleAssignments,
     config: &ArchitectureConfig,
     out: &mut Vec<Violation>,
 ) {
-    let edges = module_graph(deps, symbols);
+    let edges = module_graph(deps, keys);
     let mut incoming = BTreeMap::<String, BTreeSet<String>>::new();
     for (a, bs) in &edges {
         for b in bs {
@@ -1355,8 +1355,8 @@ pub(super) fn stability(
     };
     let mut seen = BTreeSet::new();
     for d in deps {
-        let a = module_key(symbols.files[d.from]);
-        let b = module_key(symbols.files[d.to]);
+        let a = keys[d.from].clone();
+        let b = keys[d.to].clone();
         if a == b || !seen.insert((a.clone(), b.clone())) {
             continue;
         }

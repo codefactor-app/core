@@ -30,6 +30,7 @@ struct AppState {
     expanded_vendor: Mutex<std::collections::BTreeSet<String>>,
     operation_lock: tokio::sync::Mutex<()>,
     config_snapshot: Value,
+    watch_error: RwLock<Option<String>>,
     function_info: RwLock<BTreeMap<String, Value>>,
     codemap_index: RwLock<Option<(u64, Arc<analyzer_core::codemap::DependencyIndex>)>>,
 }
@@ -112,6 +113,7 @@ pub async fn run(
         expanded_vendor: Mutex::new(std::collections::BTreeSet::new()),
         operation_lock: tokio::sync::Mutex::new(()),
         config_snapshot,
+        watch_error: RwLock::new(None),
         function_info: RwLock::new(function_info),
         codemap_index: RwLock::new(None),
     });
@@ -156,14 +158,23 @@ pub async fn run(
                 interval.tick().await;
                 let snapshot_root = root.clone();
                 let snapshot_analyzer = analyzer.clone();
+                let source_paths = state
+                    .report
+                    .read()
+                    .unwrap()
+                    .files
+                    .iter()
+                    .map(|file| file.path.clone())
+                    .collect::<Vec<_>>();
                 let current = match tokio::task::spawn_blocking(move || {
-                    source_snapshot(&snapshot_root, &snapshot_analyzer, single_file)
+                    source_snapshot_for_paths(&snapshot_root, &snapshot_analyzer, &source_paths)
                 })
                 .await
                 {
                     Ok(snapshot) => snapshot,
                     Err(error) => {
                         log::error!("watch snapshot failed: {error}");
+                        *state.watch_error.write().unwrap() = Some(error.to_string());
                         continue;
                     }
                 };
@@ -202,6 +213,7 @@ async fn reconcile_watch(
     current: SourceSnapshot,
 ) -> bool {
     if last.as_ref() == Some(&current) {
+        *state.watch_error.write().unwrap() = None;
         return false;
     }
     let _operation = state.operation_lock.lock().await;
@@ -228,6 +240,7 @@ async fn reconcile_watch(
             report.config_path = current_report.config_path.clone();
             *state.function_info.write().unwrap() = super::function_info::prepare(&mut report);
             *current_report = report;
+            *state.watch_error.write().unwrap() = None;
             state.revision.fetch_add(1, Ordering::Release);
             drop(current_report);
             // Failed scans leave the prior committed snapshot intact for retry.
@@ -236,10 +249,12 @@ async fn reconcile_watch(
         }
         Ok(Err(error)) => {
             log::error!("watch reanalysis failed: {error}");
+            *state.watch_error.write().unwrap() = Some(error.to_string());
             false
         }
         Err(error) => {
             log::error!("watch task failed: {error}");
+            *state.watch_error.write().unwrap() = Some(error.to_string());
             false
         }
     }
@@ -298,10 +313,29 @@ async fn validate_host(
         (StatusCode::MISDIRECTED_REQUEST, "unexpected Host header").into_response()
     }
 }
+#[cfg(test)]
 fn source_snapshot(root: &Path, analyzer: &Analyzer, _single_file: bool) -> SourceSnapshot {
+    let sources = analyzer_core::discovery::discover(root, &analyzer.config, &analyzer.registry)
+        .into_iter()
+        .filter(|file| {
+            !file.vendor || analyzer.config.vendor.parse == analyzer_core::config::VendorParse::Full
+        })
+        .map(|file| file.relative)
+        .collect::<Vec<_>>();
+    source_snapshot_for_paths(root, analyzer, &sources)
+}
+fn source_snapshot_for_paths(
+    root: &Path,
+    analyzer: &Analyzer,
+    sources: &[String],
+) -> SourceSnapshot {
     // Use the scanner's discovery rules, including vendor directories and language
     // overrides. This also detects added/deleted dependency files after expansion.
-    let metadata = analyzer_core::resolution::ResolutionContext::load(root, &analyzer.config);
+    let metadata = analyzer_core::resolution::ResolutionContext::load_for_sources(
+        root,
+        &analyzer.config,
+        sources.iter().map(String::as_str),
+    );
     analyzer_core::discovery::discover(root, &analyzer.config, &analyzer.registry)
         .into_iter()
         .map(|file| file.absolute)
@@ -474,6 +508,9 @@ async fn tree(State(state): State<Arc<AppState>>, Query(q): Query<TreeQuery>) ->
             let mut paths = std::collections::BTreeSet::from([v.file.clone()]);
             if let Some(d) = &v.architecture {
                 paths.extend(d.affected_ranges().map(|r| r.file.to_string()));
+            }
+            if let Some(d) = &v.module_cycle {
+                paths.extend(d.files.iter().cloned());
             }
             for path in paths {
                 *map.entry(path).or_insert(0) += 1;
@@ -854,6 +891,16 @@ async fn file(State(state): State<Arc<AppState>>, Query(q): Query<FileQuery>) ->
                                 .filter(|r| r.file.as_ref() == model.path)
                                 .map(|r| r.start_line),
                         );
+                    }
+                    if let Some(d) = &v.module_cycle {
+                        lines.extend(
+                            d.affected_ranges()
+                                .filter(|r| r.file.as_ref() == model.path)
+                                .map(|r| r.start_line),
+                        );
+                        if d.files.contains(&model.path) && lines.is_empty() {
+                            lines.push(1);
+                        }
                     }
                     lines
                 })
@@ -1282,6 +1329,9 @@ async fn architecture(State(state): State<Arc<AppState>>) -> Json<Value> {
 }
 fn issue_in_file(v: &analyzer_core::rules::Violation, path: &str) -> bool {
     v.file == path
+        || v.module_cycle
+            .as_ref()
+            .is_some_and(|d| d.files.iter().any(|file| file == path))
         || v.architecture
             .as_ref()
             .is_some_and(|d| d.affected_ranges().any(|r| r.file.as_ref() == path))
@@ -1359,6 +1409,12 @@ async fn violations(
                     || v.file.to_lowercase().contains(&needle)
                     || v.entity.to_lowercase().contains(&needle)
                     || v.rule.to_lowercase().contains(&needle)
+                    || v.module_cycle.as_ref().is_some_and(|d| {
+                        d.files
+                            .iter()
+                            .chain(&d.participants)
+                            .any(|text| text.to_lowercase().contains(&needle))
+                    })
                     || v.architecture.as_ref().is_some_and(|d| {
                         [&d.title, &d.principle, &d.fact, &d.hypothesis]
                             .iter()
@@ -1429,7 +1485,9 @@ async fn configuration(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(state.config_snapshot.clone())
 }
 async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
-    Json(json!({"revision":state.revision.load(Ordering::Acquire)}))
+    Json(
+        json!({"revision":state.revision.load(Ordering::Acquire), "watch_error":*state.watch_error.read().unwrap()}),
+    )
 }
 fn map_snapshot(state: &AppState) -> (u64, Arc<analyzer_core::codemap::DependencyIndex>) {
     // Lock the report before reading its revision: witnesses and revision are one snapshot.
@@ -1673,6 +1731,7 @@ async fn expand_vendor(
             let mut current_report = state.report.write().unwrap();
             *state.function_info.write().unwrap() = super::function_info::prepare(&mut report);
             *current_report = report;
+            *state.watch_error.write().unwrap() = None;
             state.revision.fetch_add(1, Ordering::Release);
             drop(current_report);
             state
@@ -1690,6 +1749,57 @@ async fn expand_vendor(
 #[cfg(test)]
 mod ast_tests {
     use super::*;
+    #[test]
+    fn snapshots_track_used_vendor_configs_without_discovering_unrelated_ones() {
+        let root = std::env::temp_dir().join(format!(
+            "codefactor-vendor-config-watch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for package in ["used", "unrelated"] {
+            std::fs::create_dir_all(root.join(format!("node_modules/{package}"))).unwrap();
+            std::fs::write(
+                root.join(format!("node_modules/{package}/tsconfig.json")),
+                "{}",
+            )
+            .unwrap();
+        }
+        std::fs::write(root.join("app.ts"), "export function app() {}\n").unwrap();
+        std::fs::write(
+            root.join("node_modules/used/index.ts"),
+            "export function run() {}\n",
+        )
+        .unwrap();
+        let mut registry = analyzer_core::LanguageRegistry::new();
+        registry.register(analyzer_typescript::TypeScript);
+        let analyzer = Analyzer::new(registry, Default::default());
+        let sources = vec!["app.ts".into(), "node_modules/used/index.ts".into()];
+        let before = source_snapshot_for_paths(&root, &analyzer, &sources);
+        assert!(before.contains_key(&root.join("node_modules/used/tsconfig.json")));
+        assert!(!before.contains_key(&root.join("node_modules/unrelated/tsconfig.json")));
+        std::fs::write(
+            root.join("node_modules/unrelated/tsconfig.json"),
+            "{\"extends\":\"missing\"}",
+        )
+        .unwrap();
+        assert_eq!(
+            source_snapshot_for_paths(&root, &analyzer, &sources),
+            before
+        );
+        std::fs::write(
+            root.join("node_modules/used/tsconfig.json"),
+            "{\"compilerOptions\":{\"baseUrl\":\".\"}}",
+        )
+        .unwrap();
+        assert_ne!(
+            source_snapshot_for_paths(&root, &analyzer, &sources),
+            before
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn watch_snapshot_tracks_requirements_for_targets_sharing_a_source_root() {
@@ -1792,6 +1902,7 @@ mod ast_tests {
             expanded_vendor: Mutex::new(Default::default()),
             operation_lock: tokio::sync::Mutex::new(()),
             config_snapshot: Value::Null,
+            watch_error: RwLock::new(None),
             function_info: RwLock::new(info),
             codemap_index: RwLock::new(None),
         });
@@ -1872,6 +1983,7 @@ mod ast_tests {
             expanded_vendor: Mutex::new(Default::default()),
             operation_lock: tokio::sync::Mutex::new(()),
             config_snapshot: Value::Null,
+            watch_error: RwLock::new(None),
             function_info: RwLock::new(info),
             codemap_index: RwLock::new(None),
         });
@@ -1929,6 +2041,7 @@ mod ast_tests {
             expanded_vendor: Mutex::new(Default::default()),
             operation_lock: tokio::sync::Mutex::new(()),
             config_snapshot: Value::Null,
+            watch_error: RwLock::new(None),
             function_info: RwLock::new(info),
             codemap_index: RwLock::new(None),
         });
@@ -2033,12 +2146,14 @@ mod ast_tests {
         // A transient failure after sampling must not acknowledge this snapshot.
         std::fs::remove_file(&state.root).unwrap();
         assert!(!reconcile_watch(&state, &mut last, current.clone()).await);
+        assert!(state.watch_error.read().unwrap().is_some());
         assert_eq!(last.as_ref(), Some(&previous));
         assert_eq!(state.revision.load(Ordering::Acquire), 0);
         assert_eq!(state.report.read().unwrap().architecture.warnings, 1);
         std::fs::write(&state.root, updated).unwrap();
         assert!(reconcile_watch(&state, &mut last, current.clone()).await);
         assert_eq!(last.as_ref(), Some(&current));
+        assert!(state.watch_error.read().unwrap().is_none());
         assert_eq!(state.revision.load(Ordering::Acquire), 1);
         assert_eq!(state.report.read().unwrap().architecture.warnings, 0);
         std::fs::remove_dir_all(root).unwrap();
@@ -2070,6 +2185,7 @@ mod ast_tests {
             expanded_vendor: Mutex::new(std::collections::BTreeSet::new()),
             operation_lock: tokio::sync::Mutex::new(()),
             config_snapshot: Value::Null,
+            watch_error: RwLock::new(None),
             function_info: RwLock::new(BTreeMap::new()),
             codemap_index: RwLock::new(None),
         });
@@ -2121,6 +2237,7 @@ mod ast_tests {
             expanded_vendor: Mutex::new(std::collections::BTreeSet::new()),
             operation_lock: tokio::sync::Mutex::new(()),
             config_snapshot: Value::Null,
+            watch_error: RwLock::new(None),
             function_info: RwLock::new(BTreeMap::new()),
             codemap_index: RwLock::new(None),
         });
@@ -2198,6 +2315,7 @@ mod ast_tests {
                 scope: "function".into(),
                 algorithmic_complexity: None,
                 architecture: None,
+                module_cycle: None,
             })
             .collect();
         let state = Arc::new(AppState {
@@ -2209,6 +2327,7 @@ mod ast_tests {
             expanded_vendor: Mutex::new(Default::default()),
             operation_lock: tokio::sync::Mutex::new(()),
             config_snapshot: Value::Null,
+            watch_error: RwLock::new(None),
             function_info: RwLock::new(BTreeMap::new()),
             codemap_index: RwLock::new(None),
         });

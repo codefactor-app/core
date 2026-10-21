@@ -1622,7 +1622,7 @@ fn repeated_boms_and_utf8_decoding_preserve_source_hashes_and_cache_hits() {
         let expected = Cache::content_hash(
             &format!("a.mini\0{diagnostic}\0{source}"),
             "mini",
-            "core-ir-19:strategy-1:architecture-v4-true",
+            "core-ir-20:strategy-1:architecture-v4-true",
         );
         let report = analyzer.scan(&root).unwrap();
         assert_eq!(report.files[0].source_hash, expected);

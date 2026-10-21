@@ -130,6 +130,27 @@ impl ArchitectureDiagnostic {
         )
     }
 }
+/// A numeric module-cycle finding with complete membership and bounded witnesses.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModuleCycleDiagnostic {
+    pub participants: Vec<String>,
+    pub files: Vec<String>,
+    pub cycle: CycleDetails,
+    pub evidence: Vec<Evidence>,
+    pub evidence_total: usize,
+    #[serde(default, skip_serializing)]
+    pub affected_locations: Vec<SourceRange>,
+}
+impl ModuleCycleDiagnostic {
+    pub fn affected_ranges(&self) -> impl Iterator<Item = &SourceRange> {
+        self.affected_locations.iter().chain(
+            self.evidence
+                .iter()
+                .filter(|_| self.affected_locations.is_empty())
+                .map(|e| &e.range),
+        )
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Evidence {
     pub range: SourceRange,

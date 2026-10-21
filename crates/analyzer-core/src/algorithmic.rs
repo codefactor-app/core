@@ -1474,6 +1474,7 @@ pub fn violations(files: &[FileModel], config: &Config) -> Vec<crate::rules::Vio
                 limit: None,
                 scope: "function".into(),
                 architecture: None,
+                module_cycle: None,
                 algorithmic_complexity: Some(ComplexityDiagnostic {
                     estimate: estimate.clone(),
                     threshold,

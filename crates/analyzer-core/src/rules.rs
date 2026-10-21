@@ -27,6 +27,8 @@ pub struct Violation {
     pub algorithmic_complexity: Option<crate::algorithmic::ComplexityDiagnostic>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub architecture: Option<crate::architecture::ArchitectureDiagnostic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_cycle: Option<crate::architecture::ModuleCycleDiagnostic>,
 }
 impl Violation {
     pub fn value_text(&self) -> String {
@@ -57,6 +59,17 @@ impl Violation {
             .unwrap_or_else(|| self.limit.map(|v| format!("{v:.2}")).unwrap_or_default())
     }
     pub fn message(&self) -> String {
+        if let Some(cycle) = &self.module_cycle {
+            return format!(
+                "{} is {} (limit {}); {} modules, {} files; {}",
+                self.rule,
+                self.value.map(|v| v.to_string()).unwrap_or_default(),
+                self.limit.map(|v| v.to_string()).unwrap_or_default(),
+                cycle.participants.len(),
+                cycle.files.len(),
+                cycle.cycle.path.join(" → ")
+            );
+        }
         if let Some(d) = &self.architecture {
             return format!("{} {}", d.fact, d.hypothesis);
         }
@@ -73,6 +86,15 @@ impl Violation {
             })
     }
     pub fn fingerprint(&self) -> String {
+        if let Some(cycle) = &self.module_cycle {
+            use sha2::{Digest, Sha256};
+            let mut participants = cycle.participants.clone();
+            participants.sort();
+            participants.dedup();
+            let input = serde_json::to_vec(&(&participants, &self.severity))
+                .expect("serializable cycle participants");
+            return format!("module_cycle:{:x}", Sha256::digest(input));
+        }
         if let Some(d) = &self.architecture {
             use sha2::{Digest, Sha256};
             let input = serde_json::to_vec(&(&self.rule, &d.participants))
@@ -129,6 +151,16 @@ pub(crate) fn evaluate_with_suppressions(
                 .map(|glob| (limit, glob.compile_matcher()))
         })
         .collect::<Vec<_>>();
+    let entity_limits = config
+        .limits
+        .by_entity_glob
+        .iter()
+        .filter_map(|limit| {
+            crate::config::entity_glob(&limit.glob)
+                .ok()
+                .map(|glob| (limit, glob.compile_matcher()))
+        })
+        .collect::<Vec<_>>();
     let by_path = files
         .iter()
         .map(|f| {
@@ -152,7 +184,7 @@ pub(crate) fn evaluate_with_suppressions(
         if file.vendor {
             continue;
         }
-        let Some(limit) = effective_limit(metric, file, config, paths) else {
+        let Some(limit) = effective_limit(metric, file, config, paths, &entity_limits) else {
             continue;
         };
         if let Some(v) = check(
@@ -212,6 +244,53 @@ pub(crate) fn evaluate_with_suppressions(
     out
 }
 
+/// Apply numeric cycle thresholds and legacy file baselines first, then emit one SCC.
+pub(crate) fn group_module_cycle_violations(
+    violations: &mut Vec<Violation>,
+    cycles: Vec<crate::architecture::ModuleCycleDiagnostic>,
+    baseline: &BTreeSet<String>,
+) {
+    let mut candidates = Vec::new();
+    violations.retain(|violation| {
+        if violation.rule == "module_cycle" {
+            candidates.push(violation.clone());
+            false
+        } else {
+            true
+        }
+    });
+    let mut candidates_by_file = std::collections::BTreeMap::<&str, Vec<&Violation>>::new();
+    for candidate in &candidates {
+        candidates_by_file
+            .entry(candidate.file.as_str())
+            .or_default()
+            .push(candidate);
+    }
+    for cycle in cycles {
+        let Some(mut representative) = cycle
+            .files
+            .iter()
+            .filter_map(|file| candidates_by_file.get(file.as_str()))
+            .flat_map(|candidates| candidates.iter().copied())
+            .min_by(|a, b| {
+                b.severity
+                    .cmp(&a.severity)
+                    .then_with(|| (&a.file, a.line, &a.entity).cmp(&(&b.file, b.line, &b.entity)))
+            })
+            .cloned()
+        else {
+            continue;
+        };
+        representative.module_cycle = Some(cycle);
+        if !baseline.contains(&representative.fingerprint()) {
+            violations.push(representative);
+        }
+    }
+    violations.sort_by(|a, b| {
+        (&a.file, a.line, &a.rule, &a.entity).cmp(&(&b.file, b.line, &b.rule, &b.entity))
+    });
+}
+
 fn check(
     rule: String,
     scope: String,
@@ -239,6 +318,7 @@ fn check(
         scope,
         algorithmic_complexity: None,
         architecture: None,
+        module_cycle: None,
     })
 }
 
@@ -247,6 +327,7 @@ fn effective_limit(
     file: &FileModel,
     config: &Config,
     paths: &[&crate::config::PathLimits],
+    entity_limits: &[(&crate::config::EntityGlobLimits, globset::GlobMatcher)],
 ) -> Option<Threshold> {
     let mut limit = config
         .limits
@@ -265,6 +346,13 @@ fn effective_limit(
     for item in paths {
         if let Some(path) = item.metrics.get(m.id.as_ref()) {
             overlay(&mut limit, path);
+        }
+    }
+    for (item, matcher) in entity_limits {
+        if matcher.is_match(m.entity.as_ref()) {
+            if let Some(limit_override) = item.metrics.get(m.id.as_ref()) {
+                overlay(&mut limit, limit_override);
+            }
         }
     }
     if let Some(entity) = config
@@ -448,6 +536,7 @@ mod suppression_tests {
                     scope: "function".into(),
                     algorithmic_complexity: None,
                     architecture: None,
+                    module_cycle: None,
                 };
                 assert_eq!(index.contains(&violation), suppressed(&violation, source));
             }
@@ -466,6 +555,7 @@ mod suppression_tests {
             scope: "function".into(),
             algorithmic_complexity: None,
             architecture: None,
+            module_cycle: None,
         };
         assert!(!suppressed(
             &violation,
