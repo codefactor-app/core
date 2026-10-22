@@ -127,7 +127,7 @@ codefactor metrics . --group-by file --format json --out metrics.json
 codefactor ast ./src/main.py --format json --out ast.json
 ```
 
-Console scans show up to 50 findings by default. `--all` shows every finding; `--no-explain` hides metric explanations. Exported reports retain all findings regardless of the console display limit. Detailed syntax trees are generated separately with `ast`, rather than repeated in every scan report.
+Console scans show up to 50 findings by default. `--all` shows every finding; `--no-explain` hides metric explanations. The console report is compact: functions with linear or lower cost estimates, disabled estimates and skipped architecture rules fold into summary lines, and a module cycle already described by an architecture card is printed with a pointer to that card; `--full` prints everything. The totals line also reports how many findings the baseline hides and how many baseline entries are stale. Exported reports retain all findings regardless of the console display limit. Detailed syntax trees are generated separately with `ast`, rather than repeated in every scan report.
 
 ### Trace calls and dependencies
 
@@ -158,12 +158,15 @@ paths:
   exclude: ["**/tests/**", "**/generated/**"]
 limits:
   function_params: {warn: 4, error: 7}
+  constructor_params: {warn: 8, error: 12}
   cyclomatic_complexity: {warn: 10, error: 20}
   nesting_depth: {warn: 3, error: 5}
 architecture:
   enabled: true
   profile: strict
 ```
+
+Constructor parameters have a separate metric and default limits of 8/12; other functions keep 4/7. Constructors are PHP `__construct`, Python `__init__`, JavaScript/TypeScript `constructor`, and Rust methods named `new` (a naming convention). Move existing constructor overrides to `constructor_params`; their old baseline entries become stale and can be removed with `baseline update`.
 
 Validate and inspect settings before using them in CI:
 
@@ -183,6 +186,7 @@ The default `strict` profile checks dependency cycles, explicitly configured lay
 ```yaml
 architecture:
   profile: strict
+  module_depth: {php: 2}
   layers:
     - name: domain
       selectors: ["dir:src/domain"]
@@ -193,7 +197,9 @@ architecture:
       to: infrastructure
 ```
 
-`--architecture-profile extended` adds experimental design checks, including SOLID-related findings and pattern suggestions with source evidence. Architecture findings are advisory and never change the CI exit status, including with `--fail-on-warn`. Use `--no-architecture` to disable architecture analysis.
+`--architecture-profile extended` adds experimental design checks, including SOLID-related findings and pattern suggestions with source evidence. Architecture findings are advisory and do not change the CI exit status on their own, including with `--fail-on-warn`; `--fail-on-new` separately checks for any new findings. Use `--no-architecture` to disable architecture analysis.
+
+`module_depth: {php: 2}` groups nested namespaces such as `App\Billing\Store` under `App\Billing`; use `layers` and `forbidden_dependencies` to define permitted directions. Explicit `architecture.modules` groups take precedence over depth. Changing module depth can change cycle participants and their baseline fingerprints; review findings and update the baseline.
 
 ### Set algorithmic complexity limits
 
@@ -228,6 +234,8 @@ codefactor scan . --only-violations --format json --out findings.json
 
 The multi-format example writes `report.json` and `report.md`. `--only-violations` produces a smaller JSON report containing metadata, a summary, findings and diagnostics, omitting the full file, metric and graph payloads. Operational logs go to stderr, keeping machine-readable stdout separate.
 
+Source parse errors are always included in SARIF execution notifications. Add `--fail-on-parse-errors` to `scan` or `metrics` to return status `1` when some source files cannot be parsed. Without it, the existing exit policy is preserved. Rule errors take precedence with status `2`; YAML syntax errors return `3`. `--strict-config` checks configuration only. Unknown `--lang` values are rejected before scanning.
+
 | Exit status | Meaning |
 | --- | --- |
 | `0` | No blocking findings; advisory findings may still be present |
@@ -242,9 +250,21 @@ For an existing codebase, create a baseline to suppress current findings in subs
 ```sh
 codefactor baseline create --root .
 codefactor scan . --fail-on-warn
+codefactor scan . --no-baseline
+codefactor baseline update --root .
 ```
 
-The baseline is stored as `.analyzer-baseline.json` in the analyzed root. Review and version it with your project if the same baseline should apply in CI. Individual findings can also be suppressed with an `analyzer-ignore: rule_id` source comment on the declaration line or the preceding line.
+The baseline defaults to `.analyzer-baseline.json` in the analyzed root (the parent directory for a single-file scan). `scan`, `metrics`, `baseline create` and `baseline update` accept `--baseline ci-baseline.json`, relative to that directory or absolute. `--no-baseline` disables suppression for a scan. `baseline update` rebuilds the list without baseline suppression and prints added/removed fingerprint counts. Reports identify the baseline file and count suppressed findings and stale entries. Invalid or unreadable baselines emit a stderr warning and JSON `diagnostics`; scanning continues. Review and version the baseline with your project if the same list should apply in CI. Individual findings can also be suppressed with an `analyzer-ignore: rule_id` source comment on the declaration line or the preceding line.
+
+Save a JSON snapshot and compare the next scan to focus on changes:
+
+```sh
+codefactor scan . --format json --out before.json
+codefactor scan . --compare before.json --fail-on-new
+codefactor scan . --git-changed HEAD --compare before.json --format json --out changes.json
+```
+
+`--compare` accepts full or violations-only JSON and reports new, fixed and unchanged fingerprints, counting duplicates separately. `--changed-files list.txt` (or `-` for stdin) and `--git-changed <ref>` filter findings by changed files; Git mode includes untracked files. The whole project is analyzed, cycle filtering considers all affected files, and comparison keeps every new finding even outside the selected files. An empty list hides previous findings. JSON includes `changes` and filtered finding counts; SARIF adds `baselineState`. `--fail-on-new` requires comparison and returns `1` for any new finding, including architecture findings; current rule errors still return `2`.
 
 ## Companion packages
 

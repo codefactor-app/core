@@ -1,4 +1,7 @@
-use super::*;
+use crate::support::*;
+use analyzer_core::ir::*;
+use std::path::Path;
+use tree_sitter::Node;
 
 pub(super) fn esm_path(resource: &str) -> &str {
     [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"]

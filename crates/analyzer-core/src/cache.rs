@@ -7,15 +7,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[derive(serde::Serialize)]
 struct CacheEntryRef<'a> {
     model: &'a FileModel,
-    function_costs: Vec<Option<&'a crate::algorithmic::CostNode>>,
-    architecture_facts: Option<&'a crate::architecture::FileFacts>,
+    function_costs: Vec<Option<&'a crate::algorithmic::model::CostNode>>,
+    architecture_facts: Option<&'a crate::architecture::model::FileFacts>,
 }
 #[derive(serde::Deserialize)]
 struct CacheEntry {
     model: FileModel,
-    function_costs: Vec<Option<crate::algorithmic::CostNode>>,
+    function_costs: Vec<Option<crate::algorithmic::model::CostNode>>,
     #[serde(default)]
-    architecture_facts: Option<crate::architecture::FileFacts>,
+    architecture_facts: Option<crate::architecture::model::FileFacts>,
 }
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);

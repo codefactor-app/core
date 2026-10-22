@@ -1,118 +1,9 @@
 use crate::config::{Config, Threshold};
 use crate::ir::FileModel;
 use crate::metrics::{AggregateGroup, MetricValue};
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum Severity {
-    Warn,
-    Error,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Violation {
-    pub rule: String,
-    pub severity: Severity,
-    pub file: String,
-    pub line: usize,
-    pub entity: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub value: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<f64>,
-    pub scope: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub algorithmic_complexity: Option<crate::algorithmic::ComplexityDiagnostic>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub architecture: Option<crate::architecture::ArchitectureDiagnostic>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub module_cycle: Option<crate::architecture::ModuleCycleDiagnostic>,
-}
-impl Violation {
-    pub fn value_text(&self) -> String {
-        if self.architecture.is_some() {
-            return "—".into();
-        }
-        self.algorithmic_complexity
-            .as_ref()
-            .map(|d| {
-                d.estimate
-                    .formula
-                    .clone()
-                    .unwrap_or_else(|| d.estimate.status.label().into())
-            })
-            .unwrap_or_else(|| self.value.map(|v| format!("{v:.2}")).unwrap_or_default())
-    }
-    pub fn limit_text(&self) -> String {
-        if self.architecture.is_some() {
-            return "—".into();
-        }
-        self.algorithmic_complexity
-            .as_ref()
-            .map(|d| {
-                d.threshold
-                    .clone()
-                    .unwrap_or_else(|| "complete analysis required".into())
-            })
-            .unwrap_or_else(|| self.limit.map(|v| format!("{v:.2}")).unwrap_or_default())
-    }
-    pub fn message(&self) -> String {
-        if let Some(cycle) = &self.module_cycle {
-            return format!(
-                "{} is {} (limit {}); {} modules, {} files; {}",
-                self.rule,
-                self.value.map(|v| v.to_string()).unwrap_or_default(),
-                self.limit.map(|v| v.to_string()).unwrap_or_default(),
-                cycle.participants.len(),
-                cycle.files.len(),
-                cycle.cycle.path.join(" → ")
-            );
-        }
-        if let Some(d) = &self.architecture {
-            return format!("{} {}", d.fact, d.hypothesis);
-        }
-        self.algorithmic_complexity
-            .as_ref()
-            .map(|d| d.message.clone())
-            .unwrap_or_else(|| {
-                format!(
-                    "{} is {} (limit {})",
-                    self.rule,
-                    self.value.map(|v| v.to_string()).unwrap_or_default(),
-                    self.limit.map(|v| v.to_string()).unwrap_or_default()
-                )
-            })
-    }
-    pub fn fingerprint(&self) -> String {
-        if let Some(cycle) = &self.module_cycle {
-            use sha2::{Digest, Sha256};
-            let mut participants = cycle.participants.clone();
-            participants.sort();
-            participants.dedup();
-            let input = serde_json::to_vec(&(&participants, &self.severity))
-                .expect("serializable cycle participants");
-            return format!("module_cycle:{:x}", Sha256::digest(input));
-        }
-        if let Some(d) = &self.architecture {
-            use sha2::{Digest, Sha256};
-            let input = serde_json::to_vec(&(&self.rule, &d.participants))
-                .expect("serializable participants");
-            return format!("architecture:{}:{:x}", self.rule, Sha256::digest(input));
-        }
-        format!(
-            "{}:{}:{}:{}",
-            self.file,
-            self.entity,
-            self.rule,
-            match self.severity {
-                Severity::Warn => "warn",
-                Severity::Error => "error",
-            }
-        )
-    }
-}
+pub use crate::diagnostics::{Severity, Violation};
 
 pub fn evaluate(
     metrics: &[MetricValue],
@@ -127,9 +18,43 @@ pub fn evaluate(
         files,
         aggregates,
         config,
-        baseline,
+        &mut BaselineTracker::new(baseline),
         &Suppressions::from_files(files, sources),
     )
+}
+
+/// Baseline lookups that also record which entries were used, so a report can
+/// show how much it hides and which entries no longer match anything.
+pub struct BaselineTracker<'a> {
+    entries: &'a BTreeSet<String>,
+    matched: BTreeSet<String>,
+    hits: usize,
+}
+impl<'a> BaselineTracker<'a> {
+    pub fn new(entries: &'a BTreeSet<String>) -> Self {
+        Self {
+            entries,
+            matched: BTreeSet::new(),
+            hits: 0,
+        }
+    }
+    /// True when the baseline hides this finding; the match is recorded.
+    pub fn hides(&mut self, violation: &Violation) -> bool {
+        let fingerprint = violation.fingerprint();
+        if self.entries.contains(&fingerprint) {
+            self.hits += 1;
+            self.matched.insert(fingerprint);
+            true
+        } else {
+            false
+        }
+    }
+    pub fn suppressed(&self) -> usize {
+        self.hits
+    }
+    pub fn stale(&self) -> usize {
+        self.entries.len().saturating_sub(self.matched.len())
+    }
 }
 
 pub(crate) fn evaluate_with_suppressions(
@@ -137,7 +62,7 @@ pub(crate) fn evaluate_with_suppressions(
     files: &[FileModel],
     aggregates: &[AggregateGroup],
     config: &Config,
-    baseline: &BTreeSet<String>,
+    baseline: &mut BaselineTracker<'_>,
     suppressions: &Suppressions,
 ) -> Vec<Violation> {
     let mut out = Vec::new();
@@ -196,10 +121,10 @@ pub(crate) fn evaluate_with_suppressions(
             metric.value,
             &limit,
         ) {
-            if baseline.contains(&v.fingerprint()) {
+            if suppressions.contains(&v) {
                 continue;
             }
-            if suppressions.contains(&v) {
+            if baseline.hides(&v) {
                 continue;
             }
             out.push(v);
@@ -215,7 +140,12 @@ pub(crate) fn evaluate_with_suppressions(
                 ("p95", dist.p95),
             ] {
                 let key = format!("{id}.{suffix}");
-                if let Some(l) = config.limits.aggregates.get(&key) {
+                if let Some(l) = config
+                    .limits
+                    .aggregates
+                    .get(&key)
+                    .filter(|l| l.enabled != Some(false))
+                {
                     if let Some(v) = check(
                         key,
                         "aggregate".into(),
@@ -225,7 +155,7 @@ pub(crate) fn evaluate_with_suppressions(
                         value,
                         l,
                     ) {
-                        if !baseline.contains(&v.fingerprint()) {
+                        if !baseline.hides(&v) {
                             out.push(v);
                         }
                     }
@@ -234,7 +164,7 @@ pub(crate) fn evaluate_with_suppressions(
         }
     }
     for v in crate::algorithmic::violations(files, config) {
-        if !baseline.contains(&v.fingerprint()) && !suppressions.contains(&v) {
+        if !suppressions.contains(&v) && !baseline.hides(&v) {
             out.push(v);
         }
     }
@@ -248,7 +178,7 @@ pub(crate) fn evaluate_with_suppressions(
 pub(crate) fn group_module_cycle_violations(
     violations: &mut Vec<Violation>,
     cycles: Vec<crate::architecture::ModuleCycleDiagnostic>,
-    baseline: &BTreeSet<String>,
+    baseline: &mut BaselineTracker<'_>,
 ) {
     let mut candidates = Vec::new();
     violations.retain(|violation| {
@@ -282,7 +212,7 @@ pub(crate) fn group_module_cycle_violations(
             continue;
         };
         representative.module_cycle = Some(cycle);
-        if !baseline.contains(&representative.fingerprint()) {
+        if !baseline.hides(&representative) {
             violations.push(representative);
         }
     }
@@ -363,7 +293,7 @@ fn effective_limit(
     {
         overlay(&mut limit, entity);
     }
-    if limit.warn.is_none() && limit.error.is_none() {
+    if limit.enabled == Some(false) || (limit.warn.is_none() && limit.error.is_none()) {
         None
     } else {
         Some(limit)
@@ -375,6 +305,9 @@ fn overlay(base: &mut Threshold, override_: &Threshold) {
     }
     if override_.error.is_some() {
         base.error = override_.error
+    }
+    if override_.enabled.is_some() {
+        base.enabled = override_.enabled
     }
 }
 /// Keep only actual directives, rather than rebuilding all source lines for each violation.
@@ -573,13 +506,42 @@ mod suppression_tests {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum BaselineError {
+    #[error("baseline file not found: {path}")]
+    NotFound { path: std::path::PathBuf },
+    #[error("cannot read baseline {path}: {source}")]
+    Unreadable {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+    #[error("invalid baseline {path}: {source}")]
+    Invalid {
+        path: std::path::PathBuf,
+        source: serde_json::Error,
+    },
+}
+
+pub fn read_baseline(path: &std::path::Path) -> Result<BTreeSet<String>, BaselineError> {
+    let bytes = std::fs::read(path).map_err(|source| {
+        if source.kind() == std::io::ErrorKind::NotFound {
+            BaselineError::NotFound { path: path.into() }
+        } else {
+            BaselineError::Unreadable {
+                path: path.into(),
+                source,
+            }
+        }
+    })?;
+    serde_json::from_slice::<BTreeSet<String>>(&bytes).map_err(|source| BaselineError::Invalid {
+        path: path.into(),
+        source,
+    })
+}
+
+/// Compatibility helper for callers that do not need to distinguish read errors.
 pub fn load_baseline(path: &std::path::Path) -> BTreeSet<String> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .collect()
+    read_baseline(path).unwrap_or_default()
 }
 pub fn write_baseline(path: &std::path::Path, violations: &[Violation]) -> std::io::Result<()> {
     let entries = violations
@@ -588,4 +550,148 @@ pub fn write_baseline(path: &std::path::Path, violations: &[Violation]) -> std::
         .collect::<BTreeSet<_>>();
     let data = serde_json::to_vec_pretty(&entries).unwrap_or_default();
     std::fs::write(path, data)
+}
+
+#[cfg(test)]
+mod baseline_tests {
+    use super::*;
+
+    struct Fixture(std::path::PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "codefactor-read-baseline-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            Self(root)
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn baseline_reader_accepts_existing_arrays_and_deduplicates_fingerprints() {
+        let fixture = Fixture::new();
+        let path = fixture.0.join("baseline.json");
+        std::fs::write(&path, r#"["second", "first", "second"]"#).unwrap();
+        assert_eq!(
+            read_baseline(&path).unwrap(),
+            BTreeSet::from(["first".into(), "second".into()])
+        );
+        std::fs::write(&path, "[]").unwrap();
+        assert!(read_baseline(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn baseline_reader_distinguishes_missing_unreadable_and_invalid_files() {
+        let fixture = Fixture::new();
+        let path = fixture.0.join("baseline.json");
+        assert!(matches!(
+            read_baseline(&path),
+            Err(BaselineError::NotFound { path: missing }) if missing == path
+        ));
+        assert!(matches!(
+            read_baseline(&fixture.0),
+            Err(BaselineError::Unreadable { .. })
+        ));
+        for bytes in [
+            b"not json".as_slice(),
+            b"{}",
+            b"null",
+            b"[1]",
+            b"[\"\xff\"]",
+        ] {
+            std::fs::write(&path, bytes).unwrap();
+            assert!(matches!(
+                read_baseline(&path),
+                Err(BaselineError::Invalid { .. })
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod metric_pool_contract {
+    use crate::{config::Config, ir::*, metrics::*};
+    use std::sync::Arc;
+    #[test]
+    fn metric_pool_shares_rows_without_changing_json_aggregates_or_rules() {
+        let mut file = FileModel {
+            path: "long/module/source.ts".into(),
+            language: "typescript".into(),
+            module: "long.module.source".into(),
+            ..Default::default()
+        };
+        for index in 0..100 {
+            file.functions.push(FunctionModel {
+                fqn: format!("long.module.source.function_{index}"),
+                range: SourceRange {
+                    file: file.path.clone().into(),
+                    start_line: 1,
+                    end_line: 5,
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        }
+        let mut config = Config::default();
+        config.limits.global.insert(
+            "function_lines".into(),
+            crate::config::Threshold {
+                warn: Some(3.0),
+                error: Some(8.0),
+                enabled: None,
+            },
+        );
+        let registry = MetricRegistry::new();
+        let values = registry.calculate(&file, &config);
+        assert!(values
+            .iter()
+            .all(|value| Arc::ptr_eq(&value.path, &values[0].path)));
+        let function_values = values
+            .iter()
+            .filter(|value| value.entity.as_ref() == "long.module.source.function_0")
+            .collect::<Vec<_>>();
+        assert_eq!(function_values.len(), 6);
+        assert!(function_values
+            .iter()
+            .all(|value| Arc::ptr_eq(&value.entity, &function_values[0].entity)));
+        let serialized = serde_json::to_string(&values).unwrap();
+        let mut decoded: Vec<MetricValue> = serde_json::from_str(&serialized).unwrap();
+        registry.intern_values(&mut decoded);
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), serialized);
+        assert!(decoded
+            .iter()
+            .all(|value| Arc::ptr_eq(&value.path, &decoded[0].path)));
+        let files = [file];
+        let aggregated = aggregates(&files, &decoded, 10);
+        let project = aggregated
+            .iter()
+            .find(|group| group.name == "project")
+            .unwrap();
+        assert_eq!(project.metrics["function_lines"].median, 5.0);
+        let violations = crate::rules::evaluate(
+            &decoded,
+            &files,
+            &aggregated,
+            &config,
+            &Default::default(),
+            &Default::default(),
+        );
+        assert_eq!(
+            violations
+                .iter()
+                .filter(|value| value.rule == "function_lines")
+                .count(),
+            100
+        );
+    }
 }

@@ -1,3 +1,6 @@
+mod registry;
+use registry::registry;
+mod changes;
 mod function_info;
 mod logging;
 mod presentation;
@@ -12,9 +15,9 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use analyzer_core::graph::{Direction, GraphFilter, RelationOptions, RelationPathMode};
 use analyzer_core::report_markdown::{graph_markdown, scan_markdown};
-use analyzer_core::rules::{write_baseline, Severity};
+use analyzer_core::rules::{read_baseline, write_baseline, BaselineError, Severity};
 use analyzer_core::Confidence;
-use analyzer_core::{AnalysisReport, Analyzer, Config, ConfigLoader, LanguageRegistry};
+use analyzer_core::{AnalysisReport, Analyzer, BaselinePolicy, Config, ConfigLoader};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use std::io::{self, BufWriter, IsTerminal, Write};
@@ -73,6 +76,12 @@ enum ArchitectureProfile {
 
 #[derive(Args, Clone)]
 struct Common {
+    /// Файл baseline; относительный путь задаётся от корня анализа.
+    #[arg(long, conflicts_with = "no_baseline")]
+    baseline: Option<PathBuf>,
+    /// Показать находки без подавления baseline.
+    #[arg(long)]
+    no_baseline: bool,
     /// Отключить архитектурный анализ.
     #[arg(long)]
     no_architecture: bool,
@@ -89,6 +98,21 @@ struct Common {
     strict_config: bool,
     #[arg(long)]
     fail_on_warn: bool,
+    /// Завершить проверку с ошибкой, если часть исходников не удалось разобрать.
+    #[arg(long)]
+    fail_on_parse_errors: bool,
+}
+impl Common {
+    fn baseline_policy(&self) -> BaselinePolicy {
+        if self.no_baseline {
+            BaselinePolicy::Disabled
+        } else {
+            self.baseline
+                .clone()
+                .map(BaselinePolicy::Path)
+                .unwrap_or_default()
+        }
+    }
 }
 #[derive(Args)]
 struct ScanArgs {
@@ -109,6 +133,22 @@ struct ScanArgs {
     /// Скрыть справочник метрик.
     #[arg(long)]
     no_explain: bool,
+    /// Показать всё, что компактный отчёт сворачивает: оценки всех функций,
+    /// статусы всех архитектурных правил и полные блоки циклов модулей.
+    #[arg(long)]
+    full: bool,
+    /// Сравнить находки с предыдущим полным или компактным JSON-отчётом.
+    #[arg(long)]
+    compare: Option<PathBuf>,
+    /// Пути изменённых файлов: один на строку; '-' читает stdin.
+    #[arg(long, conflicts_with = "git_changed")]
+    changed_files: Option<PathBuf>,
+    /// Файлы, изменённые относительно Git ref, включая untracked.
+    #[arg(long, allow_hyphen_values = true)]
+    git_changed: Option<String>,
+    /// Код 1, если появились новые находки по сравнению с --compare.
+    #[arg(long, requires = "compare")]
+    fail_on_new: bool,
 }
 #[derive(Args)]
 struct MetricsArgs {
@@ -238,6 +278,16 @@ enum BaselineCommand {
         root: PathBuf,
         #[arg(long)]
         config: Option<PathBuf>,
+        #[arg(long)]
+        baseline: Option<PathBuf>,
+    },
+    Update {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        baseline: Option<PathBuf>,
     },
 }
 #[derive(Args)]
@@ -334,15 +384,6 @@ enum ExternalCommand {
     },
 }
 
-fn registry() -> LanguageRegistry {
-    let mut r = LanguageRegistry::new();
-    r.register(analyzer_python::Python);
-    r.register(analyzer_javascript::JavaScript);
-    r.register(analyzer_typescript::TypeScript);
-    r.register(analyzer_php::Php);
-    r.register(analyzer_rust::Rust);
-    r
-}
 fn config_loader() -> ConfigLoader {
     let mut loader = ConfigLoader::new();
     registry().register_config_keys(&mut loader);
@@ -394,6 +435,7 @@ fn scan(
         false,
         None,
         false,
+        BaselinePolicy::Default,
     )
 }
 fn scan_options(
@@ -405,6 +447,7 @@ fn scan_options(
     no_architecture: bool,
     architecture_profile: Option<ArchitectureProfile>,
     dependency_facts: bool,
+    baseline: BaselinePolicy,
 ) -> anyhow::Result<(
     Analyzer,
     AnalysisReport,
@@ -433,13 +476,85 @@ fn scan_options(
             })
             .collect();
     }
-    let mut analyzer = Analyzer::new(registry(), config);
+    let registry = registry();
+    let unknown = config
+        .languages
+        .enabled
+        .iter()
+        .filter(|language| registry.get(language).is_none())
+        .map(|language| format!("{language:?}"))
+        .collect::<Vec<_>>();
+    if !unknown.is_empty() {
+        anyhow::bail!(
+            "Unknown language(s): {}. Available languages: {} (aliases: js, ts)",
+            unknown.join(", "),
+            registry.languages().join(", ")
+        );
+    }
+    let mut analyzer = Analyzer::new(registry, config);
+    analyzer.baseline = baseline;
     analyzer.collect_dependency_facts = dependency_facts;
     let progress = presentation::Progress::start();
     let mut report = analyzer.scan(root)?;
     drop(progress);
     report.config_path = chosen.map(|p| p.to_string_lossy().into_owned());
     Ok((analyzer, report, loaded))
+}
+fn baseline_command(command: BaselineCommand, verbose: bool) -> anyhow::Result<i32> {
+    let (update, root, config, baseline) = match command {
+        BaselineCommand::Create {
+            root,
+            config,
+            baseline,
+        } => (false, root, config, baseline),
+        BaselineCommand::Update {
+            root,
+            config,
+            baseline,
+        } => (true, root, config, baseline),
+    };
+    let canonical = std::fs::canonicalize(&root)?;
+    let base = if canonical.is_file() {
+        canonical.parent().unwrap_or(&canonical)
+    } else {
+        &canonical
+    };
+    let policy = baseline.map(BaselinePolicy::Path).unwrap_or_default();
+    let path = policy.path(base).expect("baseline writing is enabled");
+    let previous = if update {
+        match read_baseline(&path) {
+            Ok(entries) => entries,
+            Err(BaselineError::NotFound { .. }) => Default::default(),
+            Err(error) => {
+                log::warn!("{error}");
+                Default::default()
+            }
+        }
+    } else {
+        Default::default()
+    };
+    let chosen = config.or_else(|| project_config(&root));
+    let (config, _) = load_config(chosen.as_deref(), false, verbose)?;
+    let report = Analyzer::new(registry(), config).scan_without_baseline(&root)?;
+    let entries = report
+        .violations
+        .iter()
+        .map(|v| v.fingerprint())
+        .collect::<std::collections::BTreeSet<_>>();
+    write_baseline(&path, &report.violations)?;
+    println!(
+        "Wrote {} baseline entries to {}",
+        entries.len(),
+        path.display()
+    );
+    if update {
+        println!(
+            "+{} новых, −{} удалено",
+            entries.difference(&previous).count(),
+            previous.difference(&entries).count()
+        );
+    }
+    Ok(0)
 }
 #[tokio::main]
 async fn main() {
@@ -462,7 +577,7 @@ async fn run() -> anyhow::Result<i32> {
     cli.verbose |= log::log_enabled!(log::Level::Debug);
     let status = match cli.command {
         Command::Scan(a) => {
-            let (analyzer, report, _) = scan_options(
+            let (analyzer, mut report, _) = scan_options(
                 &a.common.root,
                 a.common.config.as_deref(),
                 &a.common.lang,
@@ -471,6 +586,13 @@ async fn run() -> anyhow::Result<i32> {
                 a.common.no_architecture,
                 a.common.architecture_profile,
                 false,
+                a.common.baseline_policy(),
+            )?;
+            changes::apply(
+                &mut report,
+                a.compare.as_deref(),
+                a.changed_files.as_deref(),
+                a.git_changed.as_deref(),
             )?;
             let formats = if a.format.is_empty() {
                 analyzer.config.output.formats.clone()
@@ -489,9 +611,12 @@ async fn run() -> anyhow::Result<i32> {
                         &presentation::scan(
                             &report,
                             path.is_none() && cli.color.enabled(),
-                            if a.all { usize::MAX } else { a.limit },
-                            !a.no_explain,
-                            a.only_violations,
+                            presentation::ScanView {
+                                limit: if a.all { usize::MAX } else { a.limit },
+                                explain: !a.no_explain,
+                                only_violations: a.only_violations,
+                                full: a.full,
+                            },
                         ),
                         path.as_deref(),
                     )?;
@@ -509,7 +634,12 @@ async fn run() -> anyhow::Result<i32> {
                     )?;
                 }
             }
-            exit_code(&report, a.common.fail_on_warn)
+            exit_code(
+                &report,
+                a.common.fail_on_warn,
+                a.common.fail_on_parse_errors,
+                a.fail_on_new,
+            )
         }
         Command::Metrics(a) => {
             let (analyzer, report, _) = scan_options(
@@ -521,6 +651,7 @@ async fn run() -> anyhow::Result<i32> {
                 a.common.no_architecture,
                 a.common.architecture_profile,
                 false,
+                a.common.baseline_policy(),
             )?;
             let format = a.format.unwrap_or_else(|| {
                 analyzer
@@ -567,7 +698,12 @@ async fn run() -> anyhow::Result<i32> {
                     a.out.as_deref(),
                 )?;
             }
-            exit_code(&report, a.common.fail_on_warn)
+            exit_code(
+                &report,
+                a.common.fail_on_warn,
+                a.common.fail_on_parse_errors,
+                false,
+            )
         }
         Command::Ast(a) => {
             let chosen = a.config.clone().or_else(|| project_config(&a.path));
@@ -633,28 +769,7 @@ async fn run() -> anyhow::Result<i32> {
             }
         }
         Command::Graph(a) => graph_command(a.command, cli.verbose)?,
-        Command::Baseline(a) => match a.command {
-            BaselineCommand::Create { root, config } => {
-                let chosen = config.or_else(|| project_config(&root));
-                let (cfg, _) = load_config(chosen.as_deref(), false, cli.verbose)?;
-                let analyzer = Analyzer::new(registry(), cfg);
-                let r = analyzer.scan_without_baseline(&root)?;
-                let canonical = std::fs::canonicalize(&root)?;
-                let base = if canonical.is_file() {
-                    canonical.parent().unwrap_or(&canonical)
-                } else {
-                    &canonical
-                };
-                let path = base.join(".analyzer-baseline.json");
-                write_baseline(&path, &r.violations)?;
-                println!(
-                    "Wrote {} baseline entries to {}",
-                    r.violations.len(),
-                    path.display()
-                );
-                0
-            }
-        },
+        Command::Baseline(a) => baseline_command(a.command, cli.verbose)?,
         Command::Config(a) => config_command(a.command, cli.verbose)?,
         Command::Serve(a) => {
             let (analyzer, report, loaded) = scan_options(
@@ -666,6 +781,7 @@ async fn run() -> anyhow::Result<i32> {
                 a.no_architecture,
                 a.architecture_profile,
                 true,
+                BaselinePolicy::Default,
             )?;
             serve::run(
                 analyzer, report, a.root, loaded, a.host, a.port, a.open, a.watch,
@@ -1137,6 +1253,9 @@ fn emit_formats(
                         violations: &report.violations,
                         parse_errors: &report.parse_errors,
                         resolution_diagnostics: &report.resolution_diagnostics,
+                        baseline_path: report.baseline_path.as_deref(),
+                        diagnostics: &report.diagnostics,
+                        changes: report.changes.as_ref(),
                     },
                     path.as_deref(),
                 )?;
@@ -1168,6 +1287,12 @@ struct ViolationsReport<'a> {
     parse_errors: &'a [analyzer_core::ParseError],
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     resolution_diagnostics: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    baseline_path: Option<&'a str>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    diagnostics: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    changes: Option<&'a analyzer_core::report::diff::ChangeSummary>,
 }
 fn emit_paths(
     result: &analyzer_core::graph::PathResult,
@@ -1405,6 +1530,13 @@ fn write_json_output<T: Serialize>(value: &T, path: Option<&Path>) -> anyhow::Re
 }
 
 fn sarif(r: &AnalysisReport) -> anyhow::Result<String> {
+    let compared = r.changes.as_ref().is_some_and(|changes| changes.compared);
+    let mut new = std::collections::BTreeMap::<String, usize>::new();
+    if let Some(changes) = r.changes.as_ref().filter(|_| compared) {
+        for violation in &changes.new {
+            *new.entry(serde_json::to_string(violation)?).or_default() += 1;
+        }
+    }
     let results = r
         .violations
         .iter()
@@ -1414,6 +1546,18 @@ fn sarif(r: &AnalysisReport) -> anyhow::Result<String> {
                 "level":if v.severity==Severity::Error {"error"} else {"warning"},
                 "message":{"text":v.message()}
             });
+            if compared {
+                let key = serde_json::to_string(v).expect("serializable violation");
+                let is_new = new.get_mut(&key).is_some_and(|remaining| {
+                    if *remaining == 0 {
+                        false
+                    } else {
+                        *remaining -= 1;
+                        true
+                    }
+                });
+                result["baselineState"] = serde_json::json!(if is_new { "new" } else { "unchanged" });
+            }
             if let Some(detail) = &v.algorithmic_complexity {
                 result["properties"] = serde_json::json!({"algorithmic_complexity":detail});
             }
@@ -1444,8 +1588,17 @@ fn sarif(r: &AnalysisReport) -> anyhow::Result<String> {
         .into_iter()
         .map(|id| serde_json::json!({"id":id,"shortDescription":{"text":id}}))
         .collect::<Vec<_>>();
+    let notifications = r.parse_errors.iter().map(|error| serde_json::json!({
+        "descriptor": {"id": "parse_error"},
+        "level": "error",
+        "message": {"text": error.message},
+        "locations": [{"physicalLocation": {
+            "artifactLocation": {"uri": source_uri(&error.range.file)},
+            "region": {"startLine": error.range.start_line.max(1), "startColumn": error.range.start_column.max(1)}
+        }}]
+    })).collect::<Vec<_>>();
     Ok(serde_json::to_string_pretty(
-        &serde_json::json!({"$schema":"https://json.schemastore.org/sarif-2.1.0.json","version":"2.1.0","runs":[{"tool":{"driver":{"name":"Codefactor","rules":rules}},"properties":{"strategy_capabilities":r.strategy_capabilities},"results":results}]}),
+        &serde_json::json!({"$schema":"https://json.schemastore.org/sarif-2.1.0.json","version":"2.1.0","runs":[{"tool":{"driver":{"name":"Codefactor","rules":rules}},"properties":{"strategy_capabilities":r.strategy_capabilities},"invocations":[{"executionSuccessful":r.parse_errors.is_empty(),"toolExecutionNotifications":notifications}],"results":results}]}),
     )?)
 }
 fn source_uri(path: &str) -> String {
@@ -1562,9 +1715,13 @@ fn ast_dot(root: &analyzer_core::AstNode) -> String {
     output.push_str("}\n");
     output
 }
-fn exit_code(r: &AnalysisReport, fail_warn: bool) -> i32 {
+fn exit_code(r: &AnalysisReport, fail_warn: bool, fail_parse: bool, fail_new: bool) -> i32 {
     if r.summary.errors > 0 {
         2
+    } else if fail_parse && !r.parse_errors.is_empty() {
+        1
+    } else if fail_new && r.changes.as_ref().is_some_and(|c| !c.new.is_empty()) {
+        1
     } else if fail_warn
         && r.violations
             .iter()

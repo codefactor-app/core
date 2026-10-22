@@ -1,3 +1,6 @@
+pub(crate) mod algorithmic;
+pub(crate) mod architecture;
+mod loading;
 use crate::ir::ExternalOperationRule;
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
@@ -23,8 +26,8 @@ pub struct Config {
     pub resolution: ResolutionConfig,
     pub cache: CacheConfig,
     pub output: OutputConfig,
-    pub algorithmic_complexity: crate::algorithmic::AlgorithmicConfig,
-    pub architecture: crate::architecture::ArchitectureConfig,
+    pub algorithmic_complexity: crate::algorithmic::settings::AlgorithmicConfig,
+    pub architecture: crate::config::architecture::ArchitectureConfig,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -42,8 +45,8 @@ impl Default for Config {
             resolution: ResolutionConfig::default(),
             cache: CacheConfig::default(),
             output: OutputConfig::default(),
-            algorithmic_complexity: crate::algorithmic::AlgorithmicConfig::default(),
-            architecture: crate::architecture::ArchitectureConfig::default(),
+            algorithmic_complexity: crate::algorithmic::settings::AlgorithmicConfig::default(),
+            architecture: crate::config::architecture::ArchitectureConfig::default(),
         }
     }
 }
@@ -119,12 +122,17 @@ pub enum VendorParse {
 pub struct Threshold {
     pub warn: Option<f64>,
     pub error: Option<f64>,
+    /// `false` switches the rule off at this level; a later override can set
+    /// it back to `true`. Absent means "inherit".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 impl Default for Threshold {
     fn default() -> Self {
         Self {
             warn: None,
             error: None,
+            enabled: None,
         }
     }
 }
@@ -133,6 +141,7 @@ impl Threshold {
         Self {
             warn: Some(warn),
             error: Some(error),
+            enabled: None,
         }
     }
 }
@@ -181,6 +190,7 @@ impl Default for LimitsConfig {
             ("functions_per_file".into(), Threshold::new(20.0, 40.0)),
             ("methods_per_class".into(), Threshold::new(15.0, 30.0)),
             ("function_params".into(), Threshold::new(4.0, 7.0)),
+            ("constructor_params".into(), Threshold::new(8.0, 12.0)),
             ("cyclomatic_complexity".into(), Threshold::new(10.0, 20.0)),
         ]);
         Self {
@@ -344,30 +354,13 @@ pub enum ConfigError {
     Strict(String),
 }
 
-pub type Validator = Arc<dyn Fn(&Value) -> Result<(), String> + Send + Sync>;
-pub type Handler = Arc<dyn Fn(&mut Config, &Value) + Send + Sync>;
-#[derive(Clone)]
-pub struct KeySpec {
-    pub name: String,
-    pub description: String,
-    pub default: Option<Value>,
-    pub validator: Validator,
-    pub handler: Option<Handler>,
-}
-impl KeySpec {
-    pub fn new(
-        name: impl Into<String>,
-        description: impl Into<String>,
-        validator: Validator,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            description: description.into(),
-            default: None,
-            validator,
-            handler: None,
-        }
-    }
+pub use schema::{Handler, KeySpec, Validator};
+mod schema;
+
+#[derive(Clone, Copy)]
+struct ValidationMode {
+    strict: bool,
+    verbose: bool,
 }
 
 pub struct ConfigLoader {
@@ -390,7 +383,7 @@ impl ConfigLoader {
             language_ids: std::collections::BTreeSet::new(),
         };
         loader.register_builtin();
-        for id in crate::metrics::builtin_metric_ids() {
+        for id in crate::metric_ids::builtin_metric_ids() {
             loader.register_metric(id, "Built-in metric");
         }
         loader
@@ -415,7 +408,7 @@ impl ConfigLoader {
             if v.is_mapping() {
                 Ok(())
             } else {
-                Err("expected {warn, error} mapping".into())
+                Err("expected {warn, error, enabled} mapping".into())
             }
         });
         self.register_key(KeySpec::new(format!("limits.{id}"), description, validator));
@@ -608,8 +601,9 @@ impl ConfigLoader {
                 }
             }),
         ));
-        crate::algorithmic::register_config(self);
-        crate::architecture::register_config(self);
+        for key in algorithmic::keys().into_iter().chain(architecture::keys()) {
+            self.register_key(key);
+        }
         let any: Validator = Arc::new(|_| Ok(()));
         for key in [
             "config_version",
@@ -874,11 +868,31 @@ impl ConfigLoader {
                 }),
             ));
         }
+        for path in [
+            "limits.*.enabled",
+            "limits.by_language.*.*.enabled",
+            "limits.by_path.*.*.enabled",
+            "limits.by_entity_glob.*.*.enabled",
+            "limits.by_entity.*.*.enabled",
+            "limits.aggregates.*.enabled",
+        ] {
+            self.register_key(KeySpec::new(
+                path,
+                "Switch the rule off (false) or back on (true) at this level",
+                Arc::new(|v| {
+                    if v.as_bool().is_some() {
+                        Ok(())
+                    } else {
+                        Err("expected boolean".into())
+                    }
+                }),
+            ));
+        }
         let threshold: Validator = Arc::new(|v| {
             if v.is_mapping() {
                 Ok(())
             } else {
-                Err("expected {warn, error} mapping".into())
+                Err("expected {warn, error, enabled} mapping".into())
             }
         });
         for path in [
@@ -893,7 +907,7 @@ impl ConfigLoader {
         }
         if let Some(spec) = self.keys.get_mut("metrics.count_variadic_parameters") {
             spec.description =
-                "Count each declared variadic/rest parameter in function_params".into();
+                "Count each declared variadic/rest parameter in function_params and constructor_params".into();
             spec.default = Some(Value::Bool(true));
         }
         self.register_alias("exclude", "paths.exclude");
@@ -941,187 +955,15 @@ impl ConfigLoader {
         state: &mut LoadState,
         path: &str,
     ) -> Value {
-        match value {
-            Value::Mapping(mut map) => {
-                if path.is_empty() && map.remove(Value::String("core".into())).is_some() {
-                    state.warn(
-                        "core",
-                        "core settings in included YAML are ignored; use the primary config",
-                        file,
-                    );
-                }
-                let include = if path == "paths" {
-                    None
-                } else {
-                    map.remove(Value::String("include".into()))
-                };
-                let mut base = Value::Mapping(Mapping::new());
-                if let Some(include) = include {
-                    for pattern in include_patterns(include) {
-                        let children =
-                            expand_glob(file.parent().unwrap_or(Path::new(".")), &pattern);
-                        if children.is_empty() {
-                            state.warn(path, &format!("include matched no files: {pattern}"), file);
-                            state.skipped_files.push(pattern.clone());
-                        }
-                        for child in children {
-                            match std::fs::read_to_string(&child) {
-                                Ok(text) => match serde_yaml::from_str::<Value>(&text) {
-                                    Ok(v) => {
-                                        let v = self.expand_at(
-                                            v,
-                                            &child,
-                                            stack,
-                                            depth + 1,
-                                            state,
-                                            path,
-                                        );
-                                        if v.is_mapping() {
-                                            merge(&mut base, v);
-                                        } else {
-                                            state.warn(
-                                                path,
-                                                "mapping include must contain a mapping",
-                                                &child,
-                                            );
-                                        }
-                                    }
-                                    Err(err) => {
-                                        state.warn(
-                                            path,
-                                            &format!("included YAML syntax error: {err}"),
-                                            &child,
-                                        );
-                                        state.skipped_files.push(child.display().to_string());
-                                    }
-                                },
-                                Err(err) => {
-                                    state.warn(
-                                        path,
-                                        &format!("included file unreadable: {err}"),
-                                        &child,
-                                    );
-                                    state.skipped_files.push(child.display().to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-                let mut explicit = Mapping::new();
-                for (key, val) in map {
-                    if let Value::String(k) = &key {
-                        let p = if path.is_empty() {
-                            k.clone()
-                        } else {
-                            format!("{path}.{k}")
-                        };
-                        state.provenance.insert(
-                            p.clone(),
-                            SourceLocation {
-                                file: file.display().to_string(),
-                                line: find_key_line(file, &p),
-                            },
-                        );
-                        explicit.insert(key, self.expand_inner(val, file, stack, depth, state, &p));
-                    }
-                }
-                merge(&mut base, Value::Mapping(explicit));
-                base
-            }
-            Value::Sequence(seq) => {
-                let mut out = Vec::new();
-                for (i, item) in seq.into_iter().enumerate() {
-                    if let Value::Mapping(mut map) = item.clone() {
-                        if map.len() == 1 {
-                            if let Some(include) = map.remove(Value::String("include".into())) {
-                                for pattern in include_patterns(include) {
-                                    let children = expand_glob(
-                                        file.parent().unwrap_or(Path::new(".")),
-                                        &pattern,
-                                    );
-                                    if children.is_empty() {
-                                        state.warn(
-                                            path,
-                                            &format!("include matched no files: {pattern}"),
-                                            file,
-                                        );
-                                        state.skipped_files.push(pattern.clone());
-                                    }
-                                    for child in children {
-                                        match std::fs::read_to_string(&child) {
-                                            Ok(text) => {
-                                                match serde_yaml::from_str::<Value>(&text) {
-                                                    Ok(v) => {
-                                                        let mut local = LoadState::default();
-                                                        let v = self.expand_at(
-                                                            v,
-                                                            &child,
-                                                            stack,
-                                                            depth + 1,
-                                                            &mut local,
-                                                            path,
-                                                        );
-                                                        if let Value::Sequence(items) = v {
-                                                            let offset = out.len();
-                                                            merge_indexed_provenance(
-                                                                state, local, path, offset,
-                                                            );
-                                                            out.extend(items);
-                                                        } else {
-                                                            state.warn(
-                                                                path,
-                                                                "list include must contain a list",
-                                                                &child,
-                                                            );
-                                                        }
-                                                    }
-                                                    Err(err) => {
-                                                        state.warn(
-                                                            path,
-                                                            &format!(
-                                                                "included YAML syntax error: {err}"
-                                                            ),
-                                                            &child,
-                                                        );
-                                                        state
-                                                            .skipped_files
-                                                            .push(child.display().to_string());
-                                                    }
-                                                }
-                                            }
-                                            Err(err) => {
-                                                state.warn(
-                                                    path,
-                                                    &format!("included file unreadable: {err}"),
-                                                    &child,
-                                                );
-                                                state
-                                                    .skipped_files
-                                                    .push(child.display().to_string());
-                                            }
-                                        }
-                                    }
-                                }
-                                continue;
-                            }
-                        }
-                    }
-                    let mut local = LoadState::default();
-                    let expanded = self.expand_inner(
-                        item,
-                        file,
-                        stack,
-                        depth,
-                        &mut local,
-                        &format!("{path}.{i}"),
-                    );
-                    merge_item_provenance(state, local, path, i, out.len());
-                    out.push(expanded);
-                }
-                Value::Sequence(out)
-            }
-            other => other,
+        loading::Expansion {
+            loader: self,
+            file,
+            stack,
+            depth,
+            state,
+            path,
         }
+        .value(value)
     }
     fn validate(
         &self,
@@ -1145,145 +987,163 @@ impl ConfigLoader {
         if let Value::Mapping(map) = value {
             let keys: Vec<Value> = map.keys().cloned().collect();
             for k in keys {
-                let Some(name) = k.as_str() else {
-                    map.remove(&k);
-                    state.unknown(path, strict, verbose);
-                    continue;
-                };
-                let p = child_path(path, name);
-                // Entity names may contain dots. Keep their diagnostic/provenance
-                // paths intact while treating the name as one schema map key.
-                let schema_key = if matches!(
+                self.validate_entry(
+                    map,
+                    k,
+                    path,
                     schema_path,
-                    "algorithmic_complexity.by_entity" | "algorithmic_complexity.by_language"
-                ) {
-                    child_path(schema_path, "*")
-                } else {
-                    child_path(schema_path, name)
-                };
-                if path == "limits.by_entity" {
-                    if let Some(v) = map.get_mut(&k) {
-                        if v.is_mapping() {
-                            self.validate_at(v, &p, &schema_key, state, strict, verbose);
-                        } else {
-                            map.remove(&k);
-                            state.invalid(&p, "expected entity limit mapping");
-                        }
-                    }
-                    continue;
-                }
-                if let Some(metric) = metric_name_at(path, name, map.get(&k).unwrap()) {
-                    if !self.metric_ids.contains(metric) {
-                        map.remove(&k);
-                        state.unknown(&p, strict, verbose);
-                        continue;
-                    }
-                    let Some(v) = map.get_mut(&k) else { continue };
-                    if !v.is_mapping() {
-                        map.remove(&k);
-                        state.invalid(&p, "expected {warn, error} mapping");
-                        continue;
-                    }
-                    let threshold = v.as_mapping_mut().unwrap();
-                    for field in threshold.keys().cloned().collect::<Vec<_>>() {
-                        let field_name = field.as_str().unwrap_or("");
-                        let full = child_path(&p, field_name);
-                        let valid = matches!(field_name, "warn" | "error")
-                            && threshold
-                                .get(&field)
-                                .and_then(Value::as_f64)
-                                .is_some_and(|n| n.is_finite() && n >= 0.0);
-                        if !valid {
-                            threshold.remove(&field);
-                            if matches!(field_name, "warn" | "error") {
-                                state.invalid(&full, "expected nonnegative number");
-                            } else {
-                                state.unknown(&full, strict, verbose);
-                            }
-                        }
-                    }
-                    continue;
-                }
-                let Some(spec) = self.match_key(&schema_key) else {
-                    map.remove(&k);
-                    state.unknown(&p, strict, verbose);
-                    continue;
-                };
-                if let Some(v) = map.get_mut(&k) {
-                    if let Err(message) = (spec.validator)(v) {
-                        map.remove(&k);
-                        state.invalid(&p, &message);
-                        continue;
-                    }
-                    match v {
-                        Value::Mapping(_) => {
-                            self.validate_at(v, &p, &schema_key, state, strict, verbose)
-                        }
-                        Value::Sequence(items) => {
-                            let mut kept = Vec::with_capacity(items.len());
-                            let mut kept_indices = Vec::with_capacity(items.len());
-                            for (i, mut item) in std::mem::take(items).into_iter().enumerate() {
-                                let item_path = child_path(&p, &i.to_string());
-                                let item_schema = child_path(&schema_key, &i.to_string());
-                                if let Some(spec) = self.match_key(&item_schema) {
-                                    if let Err(message) = (spec.validator)(&item) {
-                                        if message.starts_with("unknown architecture rule") {
-                                            state.unknown(&item_path, strict, verbose);
-                                        } else {
-                                            state.invalid(&item_path, &message);
-                                        }
-                                        continue;
-                                    }
-                                }
-                                if item.is_mapping() {
-                                    self.validate_at(
-                                        &mut item,
-                                        &item_path,
-                                        &item_schema,
-                                        state,
-                                        strict,
-                                        verbose,
-                                    );
-                                }
-                                if let Some(message) = dependent_item_error(&item_schema, &item) {
-                                    state.invalid(&item_path, &message);
-                                    continue;
-                                }
-                                kept_indices.push(i);
-                                kept.push(item);
-                            }
-                            state.reindex_sequence(&p, &kept_indices);
-                            *items = kept;
-                        }
-                        _ => {}
-                    }
-                }
+                    state,
+                    ValidationMode { strict, verbose },
+                );
             }
-            if schema_path.starts_with("algorithmic_complexity.")
-                && schema_path.ends_with(".limits")
-            {
-                let warn = map
-                    .get(Value::String("warn".into()))
-                    .and_then(Value::as_str);
-                let error = map
-                    .get(Value::String("error".into()))
-                    .and_then(Value::as_str);
-                if let (Some(warn), Some(error)) = (warn, error) {
-                    if let (Ok(warn), Ok(error)) = (
-                        crate::algorithmic::parse_limit(warn),
-                        crate::algorithmic::parse_limit(error),
-                    ) {
-                        if warn > error {
-                            map.remove(Value::String("warn".into()));
-                            state.invalid(&child_path(path, "warn"), "warn must not exceed error");
-                        }
-                    }
-                }
-            }
+
+            validate_growth_limits(map, path, schema_path, state);
             if schema_path == "architecture" {
                 sanitize_architecture_relations(map, path, state);
             }
         }
+    }
+    fn validate_entry(
+        &self,
+        map: &mut Mapping,
+        k: Value,
+        path: &str,
+        schema_path: &str,
+        state: &mut LoadState,
+        mode: ValidationMode,
+    ) {
+        let ValidationMode { strict, verbose } = mode;
+        let Some(name) = k.as_str() else {
+            map.remove(&k);
+            state.unknown(path, strict, verbose);
+            return;
+        };
+        let p = child_path(path, name);
+        // Entity names may contain dots. Keep their diagnostic/provenance
+        // paths intact while treating the name as one schema map key.
+        let schema_key = if matches!(
+            schema_path,
+            "algorithmic_complexity.by_entity" | "algorithmic_complexity.by_language"
+        ) {
+            child_path(schema_path, "*")
+        } else {
+            child_path(schema_path, name)
+        };
+        if path == "limits.by_entity" {
+            if let Some(v) = map.get_mut(&k) {
+                if v.is_mapping() {
+                    self.validate_at(v, &p, &schema_key, state, strict, verbose);
+                } else {
+                    map.remove(&k);
+                    state.invalid(&p, "expected entity limit mapping");
+                }
+            }
+            return;
+        }
+        if let Some(metric) = metric_name_at(path, name, map.get(&k).unwrap()) {
+            self.validate_metric(map, &k, metric, &p, state, mode);
+            return;
+        }
+        let Some(spec) = self.match_key(&schema_key) else {
+            map.remove(&k);
+            state.unknown(&p, strict, verbose);
+            return;
+        };
+        if let Some(v) = map.get_mut(&k) {
+            if let Err(message) = (spec.validator)(v) {
+                map.remove(&k);
+                state.invalid(&p, &message);
+                return;
+            }
+            match v {
+                Value::Mapping(_) => self.validate_at(v, &p, &schema_key, state, strict, verbose),
+                Value::Sequence(items) => {
+                    self.validate_items(items, &p, &schema_key, state, strict, verbose);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn validate_metric(
+        &self,
+        map: &mut Mapping,
+        k: &Value,
+        metric: &str,
+        p: &str,
+        state: &mut LoadState,
+        mode: ValidationMode,
+    ) {
+        let ValidationMode { strict, verbose } = mode;
+        if !self.metric_ids.contains(metric) {
+            map.remove(k);
+            state.unknown(p, strict, verbose);
+            return;
+        }
+        let Some(v) = map.get_mut(k) else { return };
+        if !v.is_mapping() {
+            map.remove(k);
+            state.invalid(p, "expected {warn, error, enabled} mapping");
+            return;
+        }
+        let threshold = v.as_mapping_mut().unwrap();
+        for field in threshold.keys().cloned().collect::<Vec<_>>() {
+            let field_name = field.as_str().unwrap_or("");
+            let full = child_path(p, field_name);
+            let value = threshold.get(&field);
+            let valid = match field_name {
+                "warn" | "error" => value
+                    .and_then(Value::as_f64)
+                    .is_some_and(|n| n.is_finite() && n >= 0.0),
+                "enabled" => value.and_then(Value::as_bool).is_some(),
+                _ => false,
+            };
+            if !valid {
+                threshold.remove(&field);
+                match field_name {
+                    "warn" | "error" => state.invalid(&full, "expected nonnegative number"),
+                    "enabled" => state.invalid(&full, "expected boolean"),
+                    _ => state.unknown(&full, strict, verbose),
+                }
+            }
+        }
+    }
+    fn validate_items(
+        &self,
+        items: &mut Vec<Value>,
+        p: &str,
+        schema_key: &str,
+        state: &mut LoadState,
+        strict: bool,
+        verbose: bool,
+    ) {
+        let mut kept = Vec::with_capacity(items.len());
+        let mut kept_indices = Vec::with_capacity(items.len());
+        for (i, mut item) in std::mem::take(items).into_iter().enumerate() {
+            let item_path = child_path(p, &i.to_string());
+            let item_schema = child_path(schema_key, &i.to_string());
+            if let Some(spec) = self.match_key(&item_schema) {
+                if let Err(message) = (spec.validator)(&item) {
+                    if message.starts_with("unknown architecture rule") {
+                        state.unknown(&item_path, strict, verbose);
+                    } else {
+                        state.invalid(&item_path, &message);
+                    }
+                    continue;
+                }
+            }
+            if item.is_mapping() {
+                self.validate_at(&mut item, &item_path, &item_schema, state, strict, verbose);
+            }
+            if let Some(message) = dependent_item_error(&item_schema, &item) {
+                state.invalid(&item_path, &message);
+                continue;
+            }
+            kept_indices.push(i);
+            kept.push(item);
+        }
+        state.reindex_sequence(p, &kept_indices);
+        *items = kept;
     }
     fn match_key(&self, path: &str) -> Option<&KeySpec> {
         self.keys.get(path).or_else(|| {
@@ -1293,6 +1153,28 @@ impl ConfigLoader {
                 .max_by_key(|(pattern, _)| pattern.len())
                 .map(|(_, spec)| spec)
         })
+    }
+}
+
+fn validate_growth_limits(map: &mut Mapping, path: &str, schema_path: &str, state: &mut LoadState) {
+    if schema_path.starts_with("algorithmic_complexity.") && schema_path.ends_with(".limits") {
+        let warn = map
+            .get(Value::String("warn".into()))
+            .and_then(Value::as_str);
+        let error = map
+            .get(Value::String("error".into()))
+            .and_then(Value::as_str);
+        if let (Some(warn), Some(error)) = (warn, error) {
+            if let (Ok(warn), Ok(error)) = (
+                crate::algorithmic::model::parse_limit(warn),
+                crate::algorithmic::model::parse_limit(error),
+            ) {
+                if warn > error {
+                    map.remove(Value::String("warn".into()));
+                    state.invalid(&child_path(path, "warn"), "warn must not exceed error");
+                }
+            }
+        }
     }
 }
 
@@ -1750,5 +1632,18 @@ pub fn merge(base: &mut Value, overlay: Value) {
             }
         }
         (a, b) => *a = b,
+    }
+}
+
+/// Register symbolic cost settings in a custom loader.
+pub fn register_algorithmic_config(loader: &mut ConfigLoader) {
+    for key in algorithmic::keys() {
+        loader.register_key(key);
+    }
+}
+/// Register architecture settings in a custom loader.
+pub fn register_architecture_config(loader: &mut ConfigLoader) {
+    for key in architecture::keys() {
+        loader.register_key(key);
     }
 }

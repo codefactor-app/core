@@ -1,6 +1,7 @@
 //! Recognize language-owned calls after project symbols have been considered.
 //! Qualified imports and types are accepted; arbitrary receiver variable names are not.
 use crate::runtime_symbols::*;
+use analyzer_core::ir::ExternalOperationRule;
 
 pub fn function(language: &str, symbol: &str) -> bool {
     let name = symbol.trim_start_matches('\\');
@@ -149,4 +150,32 @@ pub fn method(language: &str, owner: &str, name: &str) -> bool {
                 .split_ascii_whitespace()
                 .any(|method| method == name)
         })
+}
+
+/// Build language-owned operation descriptors using their canonical spelling.
+pub fn external_catalog(items: &[(&str, &str, &str)]) -> Vec<ExternalOperationRule> {
+    items
+        .iter()
+        .map(|(category, pattern, library)| ExternalOperationRule {
+            category: (*category).into(),
+            pattern: (*pattern).into(),
+            library: (*library).into(),
+            operation: pattern.rsplit('.').next().unwrap_or(pattern).into(),
+        })
+        .collect()
+}
+/// JavaScript and TypeScript intentionally share the runtime operation catalog.
+pub fn javascript_external_operations() -> Vec<analyzer_core::ir::ExternalOperationRule> {
+    external_catalog(&[
+        ("db", "pg.*.query", "pg"),
+        ("db", "mysql2.*.execute", "mysql2"),
+        ("db", "*@prisma/client.PrismaClient.*", "Prisma"),
+        ("queue", "amqplib.*.publish", "amqplib"),
+        ("shell", "child_process.execFile", "child_process"),
+        ("shell", "child_process.exec", "child_process"),
+        ("http", "fetch", "fetch"),
+        ("http", "axios.get", "axios"),
+        ("http", "http.request", "http"),
+        ("tcp", "net.connect", "net"),
+    ])
 }

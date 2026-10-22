@@ -1,14 +1,18 @@
 //! Deterministic architecture witnesses, never blocking diagnostics.
-mod config;
+pub use crate::config::register_architecture_config as register_config;
+pub(crate) mod spec;
+pub use spec::*;
 mod graph;
+mod witnesses;
+use witnesses::*;
 mod grouping;
 pub(crate) use grouping::{module_cycles, validate_module_assignments};
-mod model;
+pub(crate) mod model;
 mod rules;
+pub use crate::config::architecture::*;
+use crate::diagnostics::Violation;
 use crate::graph::CallGraph;
 use crate::ir::*;
-use crate::rules::{Severity, Violation};
-pub use config::*;
 pub use model::*;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -35,85 +39,6 @@ fn selected_files<'a>(files: &'a [FileModel], config: &ArchitectureConfig) -> Ve
         .collect()
 }
 
-pub struct RuleSpec {
-    pub id: &'static str,
-    pub title: &'static str,
-    pub principle: &'static str,
-    pub strict: bool,
-    pub requires_bodies: bool,
-}
-pub const RULES: &[RuleSpec] = &[
-    RuleSpec {
-        id: "arch_cycle",
-        title: "Циклические зависимости",
-        principle: "ADP",
-        strict: true,
-        requires_bodies: true,
-    },
-    RuleSpec {
-        id: "arch_boundary",
-        title: "Границы слоёв",
-        principle: "Layers / DIP",
-        strict: true,
-        requires_bodies: false,
-    },
-    RuleSpec {
-        id: "arch_dry",
-        title: "Повторяющаяся реализация",
-        principle: "DRY",
-        strict: true,
-        requires_bodies: true,
-    },
-    RuleSpec {
-        id: "arch_srp",
-        title: "Разделённые группы ответственности",
-        principle: "SRP",
-        strict: false,
-        requires_bodies: true,
-    },
-    RuleSpec {
-        id: "arch_ocp",
-        title: "Повторяющийся выбор поведения",
-        principle: "OCP",
-        strict: false,
-        requires_bodies: true,
-    },
-    RuleSpec {
-        id: "arch_lsp",
-        title: "Отказ от унаследованной операции",
-        principle: "LSP",
-        strict: false,
-        requires_bodies: true,
-    },
-    RuleSpec {
-        id: "arch_isp",
-        title: "Раздельные группы потребителей интерфейса",
-        principle: "ISP",
-        strict: false,
-        requires_bodies: true,
-    },
-    RuleSpec {
-        id: "arch_factory",
-        title: "Повторяющееся создание объектов",
-        principle: "Construction",
-        strict: false,
-        requires_bodies: true,
-    },
-    RuleSpec {
-        id: "arch_demeter",
-        title: "Доступ через промежуточные объекты",
-        principle: "LoD",
-        strict: false,
-        requires_bodies: true,
-    },
-    RuleSpec {
-        id: "arch_stability",
-        title: "Направление зависимости по устойчивости",
-        principle: "SDP",
-        strict: false,
-        requires_bodies: false,
-    },
-];
 pub fn analyze(
     files: &[FileModel],
     calls: &CallGraph,
@@ -302,55 +227,4 @@ fn coverage(r: &RuleSpec, status: &str, reason: &str, findings: usize) -> RuleCo
         }
         .into(),
     }
-}
-pub(super) fn emit(
-    out: &mut Vec<Violation>,
-    id: &str,
-    range: &SourceRange,
-    entity: &str,
-    fact: String,
-    hypothesis: &str,
-    participants: Vec<String>,
-    evidence: Vec<Evidence>,
-    measurements: BTreeMap<String, f64>,
-    recommendations: Vec<Recommendation>,
-    config: &ArchitectureConfig,
-) {
-    let spec = RULES.iter().find(|r| r.id == id).unwrap();
-    let mut participants = participants;
-    participants.sort();
-    participants.dedup();
-    let total = evidence.len();
-    let mut evidence = evidence;
-    evidence.sort_by(|a, b| (&a.range, &a.description).cmp(&(&b.range, &b.description)));
-    evidence.dedup_by(|a, b| a.range == b.range && a.description == b.description);
-    let mut affected_locations = evidence.iter().map(|e| e.range.clone()).collect::<Vec<_>>();
-    affected_locations.dedup();
-    evidence.truncate(config.max_evidence);
-    out.push(Violation{rule:id.into(),severity:Severity::Warn,file:range.file.to_string(),line:range.start_line,entity:entity.into(),value:None,limit:None,scope:match id{"arch_cycle"|"arch_boundary"|"arch_stability"=>"module","arch_srp"|"arch_lsp"|"arch_isp"=>"class",_=>"function"}.into(),algorithmic_complexity:None,module_cycle:None,architecture:Some(ArchitectureDiagnostic{
-        principle:spec.principle.into(),title:spec.title.into(),fact,hypothesis:hypothesis.into(),evidence_kind:if matches!(id,"arch_cycle"|"arch_boundary"|"arch_dry"){"structural_fact"}else{"structural_heuristic"}.into(),cycle:None,measurements,evidence,affected_locations,evidence_total:total,participants,recommendations,
-        limitations:vec!["Свидетельства относятся к статической модели; динамические цели не подтверждаются.".into(),"Архитектурная трактовка и полезность изменения требуют проверки контекста проекта.".into()]
-    })});
-}
-pub(super) fn recommendation(pattern: &str, proposal: &str, conditions: &[&str]) -> Recommendation {
-    Recommendation {
-        pattern: pattern.into(),
-        proposal: proposal.into(),
-        conditions: conditions.iter().map(|s| (*s).into()).collect(),
-    }
-}
-pub(super) fn evidence(range: &SourceRange, description: impl Into<String>) -> Evidence {
-    Evidence {
-        range: range.clone(),
-        description: description.into(),
-        dependency: None,
-    }
-}
-pub(super) fn type_id(f: &FileModel, t: &TypeModel) -> String {
-    format!("{}:{}:{}", f.language, f.path, t.fqn)
-}
-pub(super) fn in_range(inner: &SourceRange, outer: &SourceRange) -> bool {
-    inner.file == outer.file
-        && (inner.start_line, inner.start_column) >= (outer.start_line, outer.start_column)
-        && (inner.end_line, inner.end_column) <= (outer.end_line, outer.end_column)
 }

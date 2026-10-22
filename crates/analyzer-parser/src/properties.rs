@@ -1,5 +1,8 @@
 //! JS/TS property operations, kept separate from syntactically explicit calls.
-use super::*;
+use crate::{static_js, support::*, syntax::*};
+use analyzer_core::ir::*;
+use std::{collections::BTreeSet, path::Path};
+use tree_sitter::Node;
 
 pub(super) fn literal_key(node: Node<'_>, source: &str) -> Option<String> {
     if node.kind() != "string" {

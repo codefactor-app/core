@@ -1,6 +1,6 @@
 //! Annotation syntax belongs to the language adapters; the core only applies
 //! the selected neutral normalization rules.
-use crate::Dialect;
+use crate::support::Dialect;
 use analyzer_core::types::{normalize_reference, TypeReferenceSyntax};
 
 pub fn reference_syntax(dialect: Dialect) -> TypeReferenceSyntax {

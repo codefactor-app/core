@@ -1,6 +1,9 @@
 //! Narrow Rust expression typing for collection elements. This does not model
 //! arbitrary Index/IntoIterator/Deref implementations or infer by method name.
-use super::*;
+use crate::{support::*, type_index::*};
+use analyzer_core::ir::*;
+use std::collections::{BTreeMap, BTreeSet};
+use tree_sitter::Node;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Shape {
@@ -183,7 +186,7 @@ impl Typer<'_> {
         let imported = self
             .imports
             .iter()
-            .filter(|import| bindings::applies(import, &scope.range))
+            .filter(|import| crate::support::import_applies(import, &scope.range))
             .find(|import| {
                 import
                     .alias
@@ -291,7 +294,7 @@ impl Typer<'_> {
                 }
                 let mut context = scope.fqn.as_str();
                 while let Some((parent, _)) = context.rsplit_once("::") {
-                    if let Some(ty) = self.types.full.get(format!("{parent}::{raw}").as_str()) {
+                    if let Some(ty) = self.types.qualified(format!("{parent}::{raw}").as_str()) {
                         return Shape::Named((*ty).clone());
                     }
                     context = parent;

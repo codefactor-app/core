@@ -1,0 +1,80 @@
+//! Rule metadata shared with configuration validation.
+pub struct RuleSpec {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub principle: &'static str,
+    pub strict: bool,
+    pub requires_bodies: bool,
+}
+pub const RULES: &[RuleSpec] = &[
+    RuleSpec {
+        id: "arch_cycle",
+        title: "Циклические зависимости",
+        principle: "ADP",
+        strict: true,
+        requires_bodies: true,
+    },
+    RuleSpec {
+        id: "arch_boundary",
+        title: "Границы слоёв",
+        principle: "Layers / DIP",
+        strict: true,
+        requires_bodies: false,
+    },
+    RuleSpec {
+        id: "arch_dry",
+        title: "Повторяющаяся реализация",
+        principle: "DRY",
+        strict: true,
+        requires_bodies: true,
+    },
+    RuleSpec {
+        id: "arch_srp",
+        title: "Разделённые группы ответственности",
+        principle: "SRP",
+        strict: false,
+        requires_bodies: true,
+    },
+    RuleSpec {
+        id: "arch_ocp",
+        title: "Повторяющийся выбор поведения",
+        principle: "OCP",
+        strict: false,
+        requires_bodies: true,
+    },
+    RuleSpec {
+        id: "arch_lsp",
+        title: "Отказ от унаследованной операции",
+        principle: "LSP",
+        strict: false,
+        requires_bodies: true,
+    },
+    RuleSpec {
+        id: "arch_isp",
+        title: "Раздельные группы потребителей интерфейса",
+        principle: "ISP",
+        strict: false,
+        requires_bodies: true,
+    },
+    RuleSpec {
+        id: "arch_factory",
+        title: "Повторяющееся создание объектов",
+        principle: "Construction",
+        strict: false,
+        requires_bodies: true,
+    },
+    RuleSpec {
+        id: "arch_demeter",
+        title: "Доступ через промежуточные объекты",
+        principle: "LoD",
+        strict: false,
+        requires_bodies: true,
+    },
+    RuleSpec {
+        id: "arch_stability",
+        title: "Направление зависимости по устойчивости",
+        principle: "SDP",
+        strict: false,
+        requires_bodies: false,
+    },
+];

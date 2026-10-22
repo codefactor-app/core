@@ -23,8 +23,55 @@ pub fn scan_markdown(report: &AnalysisReport, only_violations: bool) -> String {
     )
     .unwrap();
     writeln!(out, "- Schema version: {}\n", cell(&report.schema_version)).unwrap();
+    if let Some(path) = &report.baseline_path {
+        writeln!(
+            out,
+            "- Baseline: `{}` (suppressed {}, stale {})\n",
+            inline(path),
+            report.summary.baseline_suppressed,
+            report.summary.baseline_stale
+        )
+        .unwrap();
+    }
     writeln!(out, "## Summary\n").unwrap();
     writeln!(out, "| Files | Functions | Types | Warnings | Errors | Parse errors | Vendor files | Parsed files | Cache hits |\n|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",report.summary.files,report.summary.functions,report.summary.types,report.summary.warnings,report.summary.errors,report.summary.parse_errors,report.summary.vendor_files,report.summary.parsed_files,report.summary.cache_hits).unwrap();
+    if let Some(changes) = &report.changes {
+        writeln!(out, "## Changes\n").unwrap();
+        if changes.compared {
+            writeln!(
+                out,
+                "New: {} · Fixed: {} · Unchanged: {}.\n",
+                changes.new.len(),
+                changes.fixed.len(),
+                changes.unchanged
+            )
+            .unwrap();
+        }
+        if !changes.compared || !changes.changed_files.is_empty() || changes.filtered_out.total > 0
+        {
+            writeln!(
+                out,
+                "Files in changed-file filter: {} · Filtered out: {} (errors: {}, warnings: {}, architecture warnings: {}).\n",
+                changes.changed_files.len(),
+                changes.filtered_out.total,
+                changes.filtered_out.errors,
+                changes.filtered_out.warnings,
+                changes.filtered_out.architecture_warnings
+            )
+            .unwrap();
+        }
+        if changes.compared {
+            change_findings(&mut out, "New findings", &changes.new);
+            change_findings(&mut out, "Fixed findings", &changes.fixed);
+        }
+    }
+    if !report.diagnostics.is_empty() {
+        writeln!(out, "## Diagnostics\n").unwrap();
+        for diagnostic in &report.diagnostics {
+            writeln!(out, "- {}", cell(diagnostic)).unwrap();
+        }
+        out.push('\n');
+    }
     if !report.resolution_diagnostics.is_empty() {
         writeln!(out, "## Resolution diagnostics\n").unwrap();
         for diagnostic in &report.resolution_diagnostics {
@@ -303,6 +350,35 @@ pub fn scan_markdown(report: &AnalysisReport, only_violations: bool) -> String {
         }
     }
     out
+}
+
+fn change_findings(out: &mut String, title: &str, findings: &[crate::rules::Violation]) {
+    if findings.is_empty() {
+        return;
+    }
+    writeln!(out, "### {title}\n").unwrap();
+    let text = |value: &str| {
+        cell(
+            &value
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect::<String>(),
+        )
+    };
+    for violation in findings {
+        writeln!(
+            out,
+            "- **{:?}** · {} · {}:{} · {} — {}",
+            violation.severity,
+            text(&violation.rule),
+            text(&violation.file),
+            violation.line,
+            text(&violation.entity),
+            text(&violation.message())
+        )
+        .unwrap();
+    }
+    out.push('\n');
 }
 
 pub fn graph_markdown(query: &GraphQuery) -> String {

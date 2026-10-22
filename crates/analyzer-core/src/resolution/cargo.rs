@@ -216,7 +216,7 @@ pub(super) fn load(
         };
         let package_name = package.name.clone();
         if let Some(root) = &package.library_root {
-            targets.add(targets::Target {
+            targets.add(Target {
                 root: root.clone(),
                 package: directory.clone(),
                 kind: "lib".into(),
@@ -250,7 +250,7 @@ pub(super) fn load(
                         .collect()
                 };
                 for root in candidates {
-                    targets.add(targets::Target {
+                    targets.add(Target {
                         requirements: context.binary_requirements(&root, bin),
                         root,
                         package: directory.clone(),
@@ -268,7 +268,7 @@ pub(super) fn load(
         if autobins {
             let main = join(&directory, "src/main.rs");
             if base.join(&main).is_file() {
-                targets.add(targets::Target {
+                targets.add(Target {
                     root: main,
                     package: directory.clone(),
                     kind: "bin".into(),
@@ -298,7 +298,7 @@ pub(super) fn load(
                         && candidate.is_file()
                     {
                         if let Some((root, name)) = confined_relative(base, &candidate).zip(name) {
-                            targets.add(targets::Target {
+                            targets.add(Target {
                                 root,
                                 package: directory.clone(),
                                 kind: "bin".into(),

@@ -171,6 +171,9 @@ fn fixture() -> (AnalysisReport, GraphQuery) {
         schema_version: "1".into(),
         root: "/project".into(),
         config_path: Some("analyzer.yaml".into()),
+        baseline_path: None,
+        diagnostics: vec![],
+        changes: None,
         strategy_capabilities: Default::default(),
         summary: Summary {
             files: 1,

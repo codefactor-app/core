@@ -1,4 +1,4 @@
-use crate::config::{ConfigLoader, KeySpec};
+use super::schema::KeySpec;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -22,6 +22,8 @@ pub struct ArchitectureConfig {
     pub layers: Vec<Layer>,
     /// Explicit file-level component groups; unmatched files retain native modules.
     pub modules: Vec<Layer>,
+    /// Maximum namespace components for native modules, by canonical language id.
+    pub module_depth: BTreeMap<String, usize>,
     pub forbidden_dependencies: Vec<Boundary>,
     pub composition_roots: Vec<String>,
     pub max_evidence: usize,
@@ -50,6 +52,7 @@ impl Default for ArchitectureConfig {
             rules: BTreeMap::new(),
             layers: vec![],
             modules: vec![],
+            module_depth: BTreeMap::new(),
             forbidden_dependencies: vec![],
             composition_roots: vec![],
             max_evidence: 50,
@@ -87,7 +90,19 @@ impl ArchitectureConfig {
     pub fn rule(&self, id: &str) -> RuleConfig {
         self.rules.get(id).cloned().unwrap_or_default()
     }
-    pub(super) fn validate_modules(&self) -> Result<(), String> {
+    pub(crate) fn validate_modules(&self) -> Result<(), String> {
+        for (language, depth) in &self.module_depth {
+            if module_separator(language).is_none() {
+                return Err(format!(
+                    "architecture.module_depth: unsupported language {language}"
+                ));
+            }
+            if *depth == 0 {
+                return Err(format!(
+                    "architecture.module_depth.{language}: depth must be a positive integer"
+                ));
+            }
+        }
         let mut module_names = BTreeSet::new();
         for module in &self.modules {
             if module.name.trim().is_empty()
@@ -110,7 +125,7 @@ impl ArchitectureConfig {
             globset::Glob::new(pattern).map_err(|e| e.to_string())?;
         }
         for id in self.disabled_rules.iter().chain(self.rules.keys()) {
-            if !super::RULES.iter().any(|r| r.id == id) {
+            if !crate::architecture::spec::RULES.iter().any(|r| r.id == id) {
                 return Err(format!("unknown architecture rule {id}"));
             }
         }
@@ -189,6 +204,17 @@ impl ArchitectureConfig {
         Ok(())
     }
 }
+
+pub(crate) fn module_separator(language: &str) -> Option<&'static str> {
+    match language {
+        "php" => Some("\\"),
+        "python" => Some("."),
+        "rust" => Some("::"),
+        "javascript" | "typescript" => Some("/"),
+        _ => None,
+    }
+}
+
 fn validate_selector(s: &str) -> Result<(), String> {
     let (kind, value) = s.split_once(':').ok_or("expected kind:value selector")?;
     if value.is_empty() || !["dir", "glob", "ns", "pkg", "mod", "class", "file"].contains(&kind) {
@@ -208,7 +234,8 @@ fn validate_module_selector(selector: &str) -> Result<(), String> {
     }
     Ok(())
 }
-pub fn register_config(loader: &mut ConfigLoader) {
+pub(super) fn keys() -> Vec<KeySpec> {
+    let mut keys = Vec::new();
     let mapping: crate::config::Validator = Arc::new(|v| {
         if v.is_mapping() {
             Ok(())
@@ -230,12 +257,34 @@ pub fn register_config(loader: &mut ConfigLoader) {
             Err("expected string".into())
         }
     });
-    loader.register_key(KeySpec::new(
+    keys.push(KeySpec::new(
         "architecture",
         "Deterministic advisory architecture analysis",
         mapping.clone(),
     ));
-    loader.register_key(KeySpec::new(
+    keys.push(KeySpec::new(
+        "architecture.module_depth",
+        "Maximum native module namespace depth by language",
+        mapping.clone(),
+    ));
+    for language in ["php", "python", "rust", "javascript", "typescript"] {
+        keys.push(KeySpec::new(
+            format!("architecture.module_depth.{language}"),
+            "Maximum native module namespace depth",
+            Arc::new(|value| {
+                if value
+                    .as_u64()
+                    .and_then(|depth| usize::try_from(depth).ok())
+                    .is_some_and(|depth| depth > 0)
+                {
+                    Ok(())
+                } else {
+                    Err("depth must be a positive integer".into())
+                }
+            }),
+        ));
+    }
+    keys.push(KeySpec::new(
         "architecture.enabled",
         "Enable architecture analysis",
         Arc::new(|v| {
@@ -246,7 +295,7 @@ pub fn register_config(loader: &mut ConfigLoader) {
             }
         }),
     ));
-    loader.register_key(KeySpec::new(
+    keys.push(KeySpec::new(
         "architecture.profile",
         "Architecture analysis profile",
         Arc::new(|v| {
@@ -259,7 +308,7 @@ pub fn register_config(loader: &mut ConfigLoader) {
             }
         }),
     ));
-    loader.register_key(KeySpec::new(
+    keys.push(KeySpec::new(
         "architecture.max_evidence",
         "Maximum evidence per finding",
         Arc::new(|v| {
@@ -270,7 +319,7 @@ pub fn register_config(loader: &mut ConfigLoader) {
             }
         }),
     ));
-    loader.register_key(KeySpec::new(
+    keys.push(KeySpec::new(
         "architecture.rules",
         "Per-rule thresholds",
         mapping.clone(),
@@ -283,13 +332,13 @@ pub fn register_config(loader: &mut ConfigLoader) {
         "architecture.forbidden_dependencies",
         "architecture.composition_roots",
     ] {
-        loader.register_key(KeySpec::new(
+        keys.push(KeySpec::new(
             key,
             "Architecture configuration list",
             list.clone(),
         ));
     }
-    loader.register_key(KeySpec::new(
+    keys.push(KeySpec::new(
         "architecture.exclude.*",
         "Excluded path glob",
         Arc::new(|v| {
@@ -298,12 +347,12 @@ pub fn register_config(loader: &mut ConfigLoader) {
                 .map_err(|e| e.to_string())
         }),
     ));
-    loader.register_key(KeySpec::new(
+    keys.push(KeySpec::new(
         "architecture.disabled_rules.*",
         "Disabled rule ID",
         Arc::new(|v| {
             let id = v.as_str().ok_or("expected rule ID string")?;
-            if super::RULES.iter().any(|r| r.id == id) {
+            if crate::architecture::spec::RULES.iter().any(|r| r.id == id) {
                 Ok(())
             } else {
                 Err(format!("unknown architecture rule {id}"))
@@ -314,7 +363,7 @@ pub fn register_config(loader: &mut ConfigLoader) {
         "architecture.composition_roots.*",
         "architecture.layers.*.selectors.*",
     ] {
-        loader.register_key(KeySpec::new(
+        keys.push(KeySpec::new(
             key,
             "Architecture selector",
             Arc::new(|v| validate_selector(v.as_str().ok_or("expected selector string")?)),
@@ -325,13 +374,13 @@ pub fn register_config(loader: &mut ConfigLoader) {
         "architecture.modules.*",
         "architecture.forbidden_dependencies.*",
     ] {
-        loader.register_key(KeySpec::new(
+        keys.push(KeySpec::new(
             key,
             "Architecture declaration",
             mapping.clone(),
         ));
     }
-    loader.register_key(KeySpec::new(
+    keys.push(KeySpec::new(
         "architecture.modules.*.name",
         "Unique module group name",
         Arc::new(|v| {
@@ -342,17 +391,17 @@ pub fn register_config(loader: &mut ConfigLoader) {
             }
         }),
     ));
-    loader.register_key(KeySpec::new(
+    keys.push(KeySpec::new(
         "architecture.modules.*.selectors",
         "Module group selectors",
         list.clone(),
     ));
-    loader.register_key(KeySpec::new(
+    keys.push(KeySpec::new(
         "architecture.modules.*.selectors.*",
         "Whole-file architecture selector",
         Arc::new(|v| validate_module_selector(v.as_str().ok_or("expected selector string")?)),
     ));
-    loader.register_key(KeySpec::new(
+    keys.push(KeySpec::new(
         "architecture.layers.*.name",
         "Unique layer name",
         Arc::new(|v| {
@@ -363,7 +412,7 @@ pub fn register_config(loader: &mut ConfigLoader) {
             }
         }),
     ));
-    loader.register_key(KeySpec::new(
+    keys.push(KeySpec::new(
         "architecture.layers.*.selectors",
         "Layer selectors",
         list,
@@ -372,9 +421,9 @@ pub fn register_config(loader: &mut ConfigLoader) {
         "architecture.forbidden_dependencies.*.from",
         "architecture.forbidden_dependencies.*.to",
     ] {
-        loader.register_key(KeySpec::new(key, "Layer name", string.clone()));
+        keys.push(KeySpec::new(key, "Layer name", string.clone()));
     }
-    loader.register_key(KeySpec::new(
+    keys.push(KeySpec::new(
         "architecture.forbidden_dependencies.*.principle",
         "Optional principle",
         Arc::new(|v| {
@@ -385,9 +434,9 @@ pub fn register_config(loader: &mut ConfigLoader) {
             }
         }),
     ));
-    for rule in super::RULES {
+    for rule in crate::architecture::spec::RULES {
         let scope = format!("architecture.rules.{}", rule.id);
-        loader.register_key(KeySpec::new(
+        keys.push(KeySpec::new(
             &scope,
             "Rule-specific thresholds",
             mapping.clone(),
@@ -407,7 +456,7 @@ pub fn register_config(loader: &mut ConfigLoader) {
                 _ => 1,
             };
             let ratio = matches!(*field, "max_usage_ratio" | "instability_delta");
-            loader.register_key(KeySpec::new(
+            keys.push(KeySpec::new(
                 format!("{scope}.{field}"),
                 "Rule-specific threshold",
                 Arc::new(move |v| {
@@ -431,4 +480,5 @@ pub fn register_config(loader: &mut ConfigLoader) {
             ));
         }
     }
+    keys
 }

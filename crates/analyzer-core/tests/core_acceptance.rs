@@ -333,6 +333,7 @@ fn rules_apply_overrides_suppression_baseline_and_vendor() {
             Threshold {
                 warn: Some(5.0),
                 error: Some(9.0),
+                enabled: None,
             },
         )]),
     );
@@ -343,6 +344,7 @@ fn rules_apply_overrides_suppression_baseline_and_vendor() {
             Threshold {
                 warn: Some(6.0),
                 error: None,
+                enabled: None,
             },
         )]),
     });
@@ -353,6 +355,7 @@ fn rules_apply_overrides_suppression_baseline_and_vendor() {
             Threshold {
                 warn: Some(7.0),
                 error: Some(8.0),
+                enabled: None,
             },
         )]),
     );
@@ -910,6 +913,193 @@ fn baseline_suppresses_aggregate_violations_too() {
     write_baseline(&root.join(".analyzer-baseline.json"), &first.violations).unwrap();
     assert!(analyzer.scan(&root).unwrap().violations.is_empty());
     let _ = std::fs::remove_dir_all(root);
+}
+
+fn baseline_test_analyzer() -> Analyzer {
+    let mut registry = LanguageRegistry::new();
+    registry.register(Mini);
+    let mut config = Config::default();
+    config.cache.enabled = false;
+    config.architecture.enabled = false;
+    config.limits.global.insert(
+        "file_lines".into(),
+        analyzer_core::config::Threshold::new(0.0, 100.0),
+    );
+    Analyzer::new(registry, config)
+}
+
+#[test]
+fn baseline_default_and_disabled_policies_record_only_the_active_path() {
+    use analyzer_core::{rules::write_baseline, BaselinePolicy};
+    let root = temp();
+    std::fs::write(root.join("one.mini"), "one\n").unwrap();
+    let path = root.canonicalize().unwrap().join(".analyzer-baseline.json");
+    let mut analyzer = baseline_test_analyzer();
+    assert!(matches!(&analyzer.baseline, BaselinePolicy::Default));
+    let missing = analyzer.scan(&root).unwrap();
+    assert_eq!(missing.baseline_path.as_deref(), path.to_str());
+    assert!(missing.diagnostics.is_empty());
+    assert_eq!(missing.violations.len(), 1);
+    write_baseline(&path, &missing.violations).unwrap();
+    let suppressed = analyzer.scan(&root).unwrap();
+    assert_eq!(suppressed.baseline_path.as_deref(), path.to_str());
+    assert!(suppressed.violations.is_empty());
+    assert_eq!(suppressed.summary.baseline_suppressed, 1);
+    assert_eq!(suppressed.summary.baseline_stale, 0);
+    analyzer.baseline = BaselinePolicy::Disabled;
+    let disabled = analyzer.scan(&root).unwrap();
+    assert!(disabled.baseline_path.is_none());
+    assert!(disabled.diagnostics.is_empty());
+    assert_eq!(disabled.violations.len(), 1);
+    assert_eq!(disabled.summary.baseline_suppressed, 0);
+    assert_eq!(disabled.summary.baseline_stale, 0);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn baseline_custom_paths_use_the_scan_base_for_directories_and_single_files() {
+    use analyzer_core::{rules::write_baseline, BaselinePolicy};
+    let root = temp();
+    let source_dir = root.join("src");
+    std::fs::create_dir_all(source_dir.join("ci")).unwrap();
+    let source = source_dir.join("one.mini");
+    std::fs::write(&source, "one\n").unwrap();
+    // An unrelated default baseline must not be read under an explicit policy.
+    std::fs::write(source_dir.join(".analyzer-baseline.json"), "invalid").unwrap();
+    let mut analyzer = baseline_test_analyzer();
+    let first = analyzer.scan_without_baseline(&source_dir).unwrap();
+    let relative = std::path::PathBuf::from("ci/accepted.json");
+    let relative_path = source_dir.canonicalize().unwrap().join(&relative);
+    write_baseline(&relative_path, &first.violations).unwrap();
+    analyzer.baseline = BaselinePolicy::Path(relative);
+    for scan_root in [&source_dir, &source] {
+        let report = analyzer.scan(scan_root).unwrap();
+        assert_eq!(report.baseline_path.as_deref(), relative_path.to_str());
+        assert!(report.diagnostics.is_empty());
+        assert!(report.violations.is_empty());
+        assert_eq!(report.summary.baseline_suppressed, 1);
+    }
+    let absolute = root.canonicalize().unwrap().join("external-baseline.json");
+    write_baseline(&absolute, &first.violations).unwrap();
+    analyzer.baseline = BaselinePolicy::Path(absolute.clone());
+    for scan_root in [&source_dir, &source] {
+        let report = analyzer.scan(scan_root).unwrap();
+        assert_eq!(report.baseline_path.as_deref(), absolute.to_str());
+        assert!(report.diagnostics.is_empty());
+        assert!(report.violations.is_empty());
+        assert_eq!(report.summary.baseline_suppressed, 1);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn baseline_errors_preserve_findings_and_recovery_clears_diagnostics() {
+    use analyzer_core::{rules::write_baseline, BaselinePolicy};
+    let root = temp();
+    std::fs::write(root.join("one.mini"), "one\n").unwrap();
+    let path = root.canonicalize().unwrap().join("accepted.json");
+    let mut analyzer = baseline_test_analyzer();
+    analyzer.baseline = BaselinePolicy::Path("accepted.json".into());
+    let missing = analyzer.scan(&root).unwrap();
+    assert_eq!(missing.baseline_path.as_deref(), path.to_str());
+    assert_eq!(missing.violations.len(), 1);
+    assert_eq!(missing.diagnostics.len(), 1);
+    assert!(missing.diagnostics[0].contains("accepted.json"));
+    std::fs::write(&path, "{not valid json").unwrap();
+    let invalid = analyzer.scan(&root).unwrap();
+    assert_eq!(invalid.baseline_path.as_deref(), path.to_str());
+    assert_eq!(invalid.violations.len(), 1);
+    assert_eq!(invalid.diagnostics.len(), 1);
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let unreadable = analyzer.scan(&root).unwrap();
+    assert_eq!(unreadable.baseline_path.as_deref(), path.to_str());
+    assert_eq!(unreadable.violations.len(), 1);
+    assert_eq!(unreadable.diagnostics.len(), 1);
+    std::fs::remove_dir(&path).unwrap();
+    write_baseline(&path, &missing.violations).unwrap();
+    let recovered = analyzer.scan(&root).unwrap();
+    assert_eq!(recovered.baseline_path.as_deref(), path.to_str());
+    assert!(recovered.violations.is_empty());
+    assert!(recovered.diagnostics.is_empty());
+    assert_eq!(recovered.summary.baseline_suppressed, 1);
+    // Only a missing default file is silent; corrupt defaults are diagnostic too.
+    std::fs::write(root.join(".analyzer-baseline.json"), "invalid").unwrap();
+    analyzer.baseline = BaselinePolicy::Default;
+    let invalid_default = analyzer.scan(&root).unwrap();
+    assert_eq!(invalid_default.violations.len(), 1);
+    assert_eq!(invalid_default.diagnostics.len(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn baseline_free_scan_ignores_valid_missing_and_invalid_policies_completely() {
+    use analyzer_core::{rules::write_baseline, BaselinePolicy};
+    let root = temp();
+    std::fs::write(root.join("one.mini"), "one\n").unwrap();
+    let mut analyzer = baseline_test_analyzer();
+    let first = analyzer.scan_without_baseline(&root).unwrap();
+    write_baseline(&root.join("accepted.json"), &first.violations).unwrap();
+    std::fs::write(root.join(".analyzer-baseline.json"), "invalid").unwrap();
+    for policy in [
+        BaselinePolicy::Default,
+        BaselinePolicy::Path("accepted.json".into()),
+        BaselinePolicy::Path("missing.json".into()),
+        BaselinePolicy::Disabled,
+    ] {
+        analyzer.baseline = policy;
+        let report = analyzer.scan_without_baseline(&root).unwrap();
+        assert!(report.baseline_path.is_none());
+        assert!(report.diagnostics.is_empty());
+        assert_eq!(report.violations.len(), 1);
+        assert_eq!(report.summary.baseline_suppressed, 0);
+        assert_eq!(report.summary.baseline_stale, 0);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn baseline_policy_and_diagnostics_refresh_when_lazy_vendor_is_expanded() {
+    use analyzer_core::{config::VendorParse, rules::write_baseline, BaselinePolicy};
+    let root = temp();
+    std::fs::create_dir_all(root.join("vendor")).unwrap();
+    std::fs::write(root.join(".gitignore"), "vendor/\n").unwrap();
+    std::fs::write(root.join("main.mini"), "call lib\n").unwrap();
+    std::fs::write(root.join("vendor/lib.mini"), "ok\n").unwrap();
+    let path = root.canonicalize().unwrap().join("accepted.json");
+    let mut analyzer = baseline_test_analyzer();
+    analyzer.config.vendor.paths = vec!["vendor/**".into()];
+    analyzer.config.vendor.parse = VendorParse::Lazy;
+    analyzer.baseline = BaselinePolicy::Path("accepted.json".into());
+    let mut report = analyzer.scan(&root).unwrap();
+    assert_eq!(report.diagnostics.len(), 1);
+    assert_eq!(report.violations.len(), 1);
+    assert_eq!(report.deferred_vendor.len(), 1);
+    let package = report.deferred_vendor[0].package.clone();
+    write_baseline(&path, &report.violations).unwrap();
+    analyzer
+        .expand_vendor(&root, &mut report, &package)
+        .unwrap();
+    assert_eq!(report.files.len(), 2);
+    assert_eq!(report.baseline_path.as_deref(), path.to_str());
+    assert!(report.diagnostics.is_empty());
+    assert!(report.violations.is_empty());
+    assert_eq!(report.summary.baseline_suppressed, 1);
+    std::fs::write(&path, "invalid").unwrap();
+    analyzer
+        .expand_vendor(&root, &mut report, &package)
+        .unwrap();
+    assert_eq!(report.diagnostics.len(), 1);
+    assert_eq!(report.violations.len(), 1);
+    assert_eq!(report.summary.baseline_suppressed, 0);
+    analyzer.baseline = BaselinePolicy::Disabled;
+    analyzer
+        .expand_vendor(&root, &mut report, &package)
+        .unwrap();
+    assert!(report.baseline_path.is_none());
+    assert!(report.diagnostics.is_empty());
+    assert_eq!(report.violations.len(), 1);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -1622,7 +1812,7 @@ fn repeated_boms_and_utf8_decoding_preserve_source_hashes_and_cache_hits() {
         let expected = Cache::content_hash(
             &format!("a.mini\0{diagnostic}\0{source}"),
             "mini",
-            "core-ir-20:strategy-1:architecture-v4-true",
+            "core-ir-21:strategy-1:architecture-v4-true",
         );
         let report = analyzer.scan(&root).unwrap();
         assert_eq!(report.files[0].source_hash, expected);

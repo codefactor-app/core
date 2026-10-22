@@ -23,7 +23,7 @@ function controller(){
   document:{getElementById:id=>id==='map-matrix-spacer'&&!elements.has(id)?null:element(id),createElement:()=>({click(){downloads.push(this.href);}})},URLSearchParams,Blob,
   URL:{createObjectURL:body=>{const url='blob:'+downloads.length;downloads.bodies.push(body);return url;},revokeObjectURL(){}},
   setTimeout:(fn,delay)=>delay===1000?0:setTimeout(fn,delay),clearTimeout,Map,Set,Date,Number,JSON,Math};
- downloads.bodies=[];vm.runInNewContext(fs.readFileSync(require.resolve('../web/codemap.js'),'utf8'),context);
+ downloads.bodies=[];vm.runInNewContext(fs.readFileSync(require.resolve('../web/ui-utils.js'),'utf8'),context);vm.runInNewContext(fs.readFileSync(require.resolve('../web/codemap.js'),'utf8'),context);
  const map=context.window.CodefactorMap.create({get:path=>new Promise((resolve,reject)=>pending.push({path,resolve,reject})),onChange(){},onSource(){}});
  const click=attributes=>element('page-codemap').events.get('click')({type:'click',detail:0,target:{closest:selector=>attributes[selector]||null}});
  return {map,pending,downloads,element,click,change:(...args)=>controls.change(...args),action:(...args)=>controls.action(...args)};

@@ -1,4 +1,4 @@
-use crate::ir::SourceRange;
+use crate::source::SourceRange;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -122,12 +122,7 @@ pub struct ArchitectureDiagnostic {
 impl ArchitectureDiagnostic {
     /// Deserialized public reports can only provide their retained evidence ranges.
     pub fn affected_ranges(&self) -> impl Iterator<Item = &SourceRange> {
-        self.affected_locations.iter().chain(
-            self.evidence
-                .iter()
-                .filter(|_| self.affected_locations.is_empty())
-                .map(|e| &e.range),
-        )
+        diagnostic_ranges(&self.affected_locations, &self.evidence)
     }
 }
 /// A numeric module-cycle finding with complete membership and bounded witnesses.
@@ -143,12 +138,7 @@ pub struct ModuleCycleDiagnostic {
 }
 impl ModuleCycleDiagnostic {
     pub fn affected_ranges(&self) -> impl Iterator<Item = &SourceRange> {
-        self.affected_locations.iter().chain(
-            self.evidence
-                .iter()
-                .filter(|_| self.affected_locations.is_empty())
-                .map(|e| &e.range),
-        )
+        diagnostic_ranges(&self.affected_locations, &self.evidence)
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -197,4 +187,16 @@ pub struct Dependency<'a> {
     pub source_entity: &'a str,
     pub target_entity: &'a str,
     pub concrete: bool,
+}
+
+fn diagnostic_ranges<'a>(
+    locations: &'a [SourceRange],
+    evidence: &'a [Evidence],
+) -> impl Iterator<Item = &'a SourceRange> {
+    locations.iter().chain(
+        evidence
+            .iter()
+            .filter(move |_| locations.is_empty())
+            .map(|e| &e.range),
+    )
 }

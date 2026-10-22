@@ -452,3 +452,70 @@ fn package_core_version_is_visible_and_accepted_by_strict_config_commands() {
     ]);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn compact_console_folds_noise_and_full_restores_it() {
+    let root = fixture();
+    for (name, source) in [
+        ("a.py", "from b import ping_b\ndef ping_a(): ping_b()\n"),
+        ("b.py", "from c import ping_c\ndef ping_b(): ping_c()\n"),
+        ("c.py", "from a import ping_a\ndef ping_c(): ping_a()\n"),
+    ] {
+        std::fs::write(root.join("src").join(name), source).unwrap();
+    }
+    std::fs::write(
+        root.join("analyzer.yaml"),
+        "cache: {enabled: false}\nalgorithmic_complexity: {enabled: false}\nlimits:\n  module_cycle: {warn: 0}\n  function_params: {warn: 0, error: 3}\n  function_lines: {warn: 1, error: 50}\n",
+    )
+    .unwrap();
+    let scan = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_codefactor"))
+            .arg("scan")
+            .arg(&root)
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let compact = scan(&[]);
+    assert!(compact.contains("отключено: "), "{compact}");
+    assert!(compact.contains("Оценки не вычислялись"), "{compact}");
+    assert!(!compact.contains("анализ отключён"), "{compact}");
+    assert!(
+        compact.contains("правил: skipped — Доступно в extended"),
+        "{compact}"
+    );
+    assert!(!compact.contains("Границы слоёв: skipped"), "{compact}");
+    assert!(
+        compact.contains("Подробности: Архитектура · ПРЕДУПРЕЖДЕНИЕ #1"),
+        "{compact}"
+    );
+    assert!(!compact.contains("Файлы компоненты:"), "{compact}");
+    assert!(compact.contains("(×"), "{compact}");
+    assert!(compact.contains("Что делать:"), "{compact}");
+    assert!(!compact.contains("скрыто baseline"), "{compact}");
+    let full = scan(&["--full"]);
+    assert!(full.contains("анализ отключён"), "{full}");
+    assert!(full.contains("Границы слоёв: skipped"), "{full}");
+    assert!(full.contains("Файлы компоненты:"), "{full}");
+    assert!(!full.contains("Подробности: Архитектура"), "{full}");
+
+    run(&["baseline", "create", "--root", root.to_str().unwrap()]);
+    let hidden = scan(&[]);
+    assert!(hidden.contains("скрыто baseline: "), "{hidden}");
+    assert!(!hidden.contains("устаревших записей"), "{hidden}");
+    std::fs::write(
+        root.join("analyzer.yaml"),
+        "cache: {enabled: false}\nalgorithmic_complexity: {enabled: false}\nlimits:\n  module_cycle: {warn: 0}\n  function_params: {warn: 100, error: 200}\n  function_lines: {warn: 100, error: 200}\n",
+    )
+    .unwrap();
+    let stale = scan(&["--format", "json"]);
+    let json: serde_json::Value = serde_json::from_str(&stale).unwrap();
+    assert!(
+        json["summary"]["baseline_stale"].as_u64().unwrap() > 0,
+        "{stale}"
+    );
+    assert!(json["summary"]["baseline_suppressed"].as_u64().unwrap() > 0);
+    assert!(scan(&[]).contains("устаревших записей baseline: "));
+    std::fs::remove_dir_all(root).unwrap();
+}

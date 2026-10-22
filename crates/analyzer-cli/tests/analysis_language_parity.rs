@@ -392,15 +392,11 @@ class Static:
             "{class}"
         );
     }
-    let static_lcom = metrics
-        .iter()
-        .find(|metric| {
+    assert!(
+        !metrics.iter().any(|metric| {
             metric.entity.as_ref() == "receivers.Static" && metric.id.as_ref() == "lcom4"
-        })
-        .unwrap();
-    assert_eq!(
-        static_lcom.value, 2.0,
-        "a parameter named self is not an implicit receiver in a static method"
+        }),
+        "a class with only static methods has no instance-cohesion metric"
     );
 }
 

@@ -54,6 +54,17 @@ pub(super) struct InheritanceIndex {
 }
 
 impl InheritanceIndex {
+    pub(super) fn empty(registry: &LanguageRegistry) -> Self {
+        Self {
+            python: BTreeMap::new(),
+            php: BTreeMap::new(),
+            php_parents: BTreeMap::new(),
+            php_traits: BTreeSet::new(),
+            php_consumers: BTreeMap::new(),
+            diagnostics: Vec::new(),
+            strategies: registry.clone(),
+        }
+    }
     pub fn new(
         files: &[FileModel],
         parents: &Parents<'_>,

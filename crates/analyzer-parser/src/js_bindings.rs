@@ -1,5 +1,11 @@
 //! Exact lexical callable/object proofs for JS/TS. No project code is executed.
-use super::*;
+use crate::{properties, static_js, support::*, syntax::*};
+use analyzer_core::ir::*;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
+use tree_sitter::Node;
 
 #[derive(Clone, Copy)]
 enum Lexical<'a> {

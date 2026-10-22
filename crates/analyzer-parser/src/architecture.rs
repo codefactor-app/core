@@ -1,7 +1,13 @@
 //! Conservative structural witnesses. Unsupported binding forms retain exact spelling.
-use super::*;
+use crate::{support::*, syntax::*};
 use analyzer_core::architecture::*;
+use analyzer_core::ir::*;
 use std::fmt::Write;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
+use tree_sitter::Node;
 
 #[derive(Default)]
 struct ShadowState {
@@ -62,9 +68,7 @@ pub(super) fn extract(
             .filter(|_| is_type(node.kind(), dialect))
         {
             let header = signature(node, child(node, "body"), source);
-            if header.split_whitespace().any(|s| s == "abstract")
-                || matches!(t.kind, TypeKind::Trait | TypeKind::Interface)
-            {
+            if is_abstract_type(node, &t.kind) {
                 facts.abstract_types.push(t.fqn.clone());
             }
             if matches!(t.kind, TypeKind::Enum)
@@ -274,6 +278,286 @@ fn function_facts<'tree>(
     facts: &mut FileFacts,
     shadows: &mut ShadowState,
 ) -> Vec<Node<'tree>> {
+    let (mut ff, qualified_namespace) = initial_function_facts(body, f, source, dialect);
+    let mut nested = Vec::new();
+    let mut stack = vec![body];
+    let mut blocks = vec![body];
+    let mut rebound_roots = BTreeSet::new();
+    let mut chain_roots = Vec::new();
+    let mut local_types = BTreeMap::new();
+    let mut writes = BTreeMap::<String, usize>::new();
+    let mut accesses = Vec::new();
+    while let Some(n) = stack.pop() {
+        shadows.isinstance |= record_shadow(n, source, dialect, facts);
+        record_rust_namespace(n, source, dialect, shadows);
+        php_class_reference(n, source, path, dialect, facts);
+        record_function_writes(n, f, source, &mut writes, &mut rebound_roots);
+        if n.id() != body.id() && (is_function(n.kind(), dialect) || is_type(n.kind(), dialect)) {
+            nested.push(n);
+            continue;
+        }
+        record_function_local_type(n, source, dialect, &mut local_types);
+        if let Some(access) = value_access(n, Some(f), model, &local_types, source, path, dialect) {
+            accesses.push(access);
+        }
+        record_function_type_reference(n, source, path, dialect, facts);
+        record_function_fields(n, source, dialect, &mut ff);
+        record_function_decisions(n, f, source, path, dialect, &mut ff, facts);
+        record_function_chain(n, f, source, path, dialect, &mut ff, &mut chain_roots);
+        if n.id() != body.id() && is_block(n) {
+            blocks.push(n);
+        }
+        stack.extend(named_children(n).into_iter().rev());
+    }
+    ff.own_fields.sort();
+    ff.own_fields.dedup();
+    commit_function_accesses(facts, accesses, &writes, &local_types, &rebound_roots);
+    invalidate_chain_roots(&mut ff, chain_roots, &rebound_roots);
+    record_function_fragments(body, blocks, f, source, path, dialect, facts);
+
+    if let Some(namespace) = qualified_namespace {
+        shadows
+            .qualified_stubs
+            .push((facts.functions.len(), namespace));
+    }
+    facts.functions.push(ff);
+    nested
+}
+fn invalidate_chain_roots(
+    ff: &mut FunctionFacts,
+    chain_roots: Vec<(usize, &str)>,
+    rebound_roots: &BTreeSet<&str>,
+) {
+    // Reassignments or lexical shadows defeat the original parameter annotation.
+    // Without a binding identity for the complete chain, keep its range but no type proof.
+    for (index, root) in chain_roots {
+        if rebound_roots.contains(root) {
+            ff.member_chains[index].root_type = None;
+        }
+    }
+}
+fn record_function_writes<'source>(
+    n: Node<'_>,
+    f: &FunctionModel,
+    source: &'source str,
+    writes: &mut BTreeMap<String, usize>,
+    rebound_roots: &mut BTreeSet<&'source str>,
+) {
+    for_each_binding_name(n, source, |name| {
+        *writes.entry(name.into()).or_default() += 1;
+        if ["self", "this"].contains(&name) || f.parameters.iter().any(|p| p.name == name) {
+            rebound_roots.insert(name);
+        }
+    });
+}
+fn record_function_local_type(
+    n: Node<'_>,
+    source: &str,
+    dialect: Dialect,
+    local_types: &mut BTreeMap<String, String>,
+) {
+    if matches!(
+        n.kind(),
+        "variable_declarator" | "let_declaration" | "assignment" | "assignment_expression"
+    ) {
+        if let Some(target) = child(n, "name")
+            .or_else(|| child(n, "pattern"))
+            .or_else(|| child(n, "left"))
+        {
+            if matches!(target.kind(), "identifier" | "variable_name") {
+                let ty = child(n, "type")
+                    .map(|ty| trim_type(snippet(ty, source)))
+                    .or_else(|| {
+                        child(n, "value")
+                            .or_else(|| child(n, "right"))
+                            .filter(|v| {
+                                matches!(
+                                    v.kind(),
+                                    "new_expression"
+                                        | "object_creation_expression"
+                                        | "struct_expression"
+                                )
+                            })
+                            .and_then(|v| creation_name(v, source, dialect))
+                    });
+                if let Some(ty) = ty {
+                    local_types.insert(
+                        snippet(target, source).trim_start_matches('$').to_string(),
+                        ty,
+                    );
+                }
+            }
+        }
+    }
+}
+fn record_function_type_reference(
+    n: Node<'_>,
+    source: &str,
+    path: &Path,
+    dialect: Dialect,
+    facts: &mut FileFacts,
+) {
+    if (matches!(
+        n.kind(),
+        "type_identifier" | "scoped_type_identifier" | "qualified_name" | "named_type"
+    ) || python_annotation_reference(n, dialect))
+        && !php_class_reference_child(n, dialect)
+        && n.parent().is_none_or(|p| {
+            !matches!(
+                p.kind(),
+                "scoped_type_identifier" | "qualified_name" | "named_type"
+            )
+        })
+    {
+        facts.references.push(TypeReference {
+            name: snippet(n, source).into(),
+            kind: "type_reference".into(),
+            range: range(n, path),
+        });
+    }
+}
+fn record_function_fields(n: Node<'_>, source: &str, dialect: Dialect, ff: &mut FunctionFacts) {
+    if n.kind().contains("subscript")
+        || n.kind().contains("computed_property")
+        || snippet(n, source).starts_with("getattr(")
+    {
+        ff.dynamic_access = true;
+    }
+    if let Some((object, field)) = member(n, dialect) {
+        let dynamic_field = dialect == Dialect::Php && field.kind() != "name";
+        ff.dynamic_access |= dynamic_field;
+        if !dynamic_field && ["self", "this", "$this"].contains(&snippet(object, source).trim()) {
+            // Method names are not fields, even when their AST is a member expression.
+            let called = is_call(n.kind(), dialect)
+                || n.parent().is_some_and(|p| {
+                    child(p, "function").is_some_and(|c| c.id() == n.id())
+                        || child(p, "name").is_some_and(|c| c.id() == field.id())
+                            && is_call(p.kind(), dialect)
+                });
+            if !called {
+                ff.own_fields
+                    .push(snippet(field, source).trim().trim_start_matches('$').into());
+            }
+        }
+    }
+}
+fn record_function_decisions(
+    n: Node<'_>,
+    f: &FunctionModel,
+    source: &str,
+    path: &Path,
+    dialect: Dialect,
+    ff: &mut FunctionFacts,
+    facts: &mut FileFacts,
+) {
+    if matches!(n.kind(), "if_statement" | "if_expression") {
+        // Else-if nodes belong to their outer decision.
+        let nested_else = n.parent().is_some_and(|p| {
+            child(p, "alternative").is_some_and(|a| a.id() == n.id()) || p.kind() == "else_clause"
+        });
+        if !nested_else {
+            if let Some(d) = decision(n, f, source, path, dialect) {
+                ff.decisions.push(d);
+            }
+        }
+    }
+    if matches!(
+        n.kind(),
+        "switch_statement" | "match_expression" | "match_statement"
+    ) {
+        if let Some(d) = switch_decision(n, f, source, path, dialect) {
+            ff.decisions.push(d);
+        }
+    }
+    if matches!(
+        n.kind(),
+        "new_expression" | "object_creation_expression" | "struct_expression"
+    ) {
+        if let Some(name) = creation_name(n, source, dialect) {
+            facts.references.push(TypeReference {
+                name,
+                kind: "construction".into(),
+                range: range(n, path),
+            });
+        }
+    }
+}
+fn record_function_chain<'source>(
+    n: Node<'_>,
+    f: &FunctionModel,
+    source: &'source str,
+    path: &Path,
+    dialect: Dialect,
+    ff: &mut FunctionFacts,
+    chain_roots: &mut Vec<(usize, &'source str)>,
+) {
+    if is_call(n.kind(), dialect) {
+        if let Some(fun) = (dialect == Dialect::Php && member(n, dialect).is_some())
+            .then_some(n)
+            .or_else(|| child(n, "function"))
+            .or_else(|| child(n, "object"))
+        {
+            let mut at = fun;
+            let mut members = Vec::new();
+            while let Some((obj, field)) = member(at, dialect) {
+                members.push(snippet(field, source).into());
+                at = obj;
+            }
+            if members.len() >= 3 {
+                members.reverse();
+                let root = snippet(at, source).trim().trim_start_matches('$');
+                let ty = f
+                    .parameters
+                    .iter()
+                    .find(|p| p.name == root)
+                    .and_then(|p| p.type_name.clone())
+                    .or_else(|| {
+                        ["this", "self"]
+                            .contains(&root)
+                            .then(|| f.parent_type.clone())
+                            .flatten()
+                    });
+                ff.member_chains.push(MemberChain {
+                    root_type: ty,
+                    members,
+                    range: range(n, path),
+                });
+                chain_roots.push((ff.member_chains.len() - 1, root));
+            }
+        }
+    }
+}
+fn commit_function_accesses(
+    facts: &mut FileFacts,
+    accesses: Vec<ValueAccess>,
+    writes: &BTreeMap<String, usize>,
+    local_types: &BTreeMap<String, String>,
+    rebound_roots: &BTreeSet<&str>,
+) {
+    for mut access in accesses {
+        let root = access
+            .receiver
+            .trim_start_matches('$')
+            .split(['.', '-', ':', '\\'])
+            .next()
+            .unwrap_or("");
+        let assigned = writes.get(root).copied().unwrap_or(0);
+        if rebound_roots.contains(root)
+            || assigned > usize::from(local_types.contains_key(root))
+            || (assigned > 0 && access.receiver_type.is_none())
+        {
+            access.receiver_type = None;
+            access.binding_unknown = true;
+        }
+        facts.value_accesses.push(access);
+    }
+}
+fn initial_function_facts(
+    body: Node<'_>,
+    f: &FunctionModel,
+    source: &str,
+    dialect: Dialect,
+) -> (FunctionFacts, Option<String>) {
     let mut ff = FunctionFacts {
         fqn: f.fqn.clone(),
         range: f.range.clone(),
@@ -320,204 +604,17 @@ fn function_facts<'tree>(
         && !statements
             .iter()
             .all(|n| matches!(n.kind(), "raise_statement" | "throw_statement"));
-    let mut nested = Vec::new();
-    let mut stack = vec![body];
-    let mut blocks = vec![body];
-    let mut rebound_roots = BTreeSet::new();
-    let mut chain_roots = Vec::new();
-    let mut local_types = BTreeMap::new();
-    let mut writes = BTreeMap::<String, usize>::new();
-    let mut accesses = Vec::new();
-    while let Some(n) = stack.pop() {
-        shadows.isinstance |= record_shadow(n, source, dialect, facts);
-        record_rust_namespace(n, source, dialect, shadows);
-        php_class_reference(n, source, path, dialect, facts);
-        for_each_binding_name(n, source, |name| {
-            *writes.entry(name.into()).or_default() += 1;
-            if ["self", "this"].contains(&name) || f.parameters.iter().any(|p| p.name == name) {
-                rebound_roots.insert(name);
-            }
-        });
-        if n.id() != body.id() && (is_function(n.kind(), dialect) || is_type(n.kind(), dialect)) {
-            nested.push(n);
-            continue;
-        }
-        if matches!(
-            n.kind(),
-            "variable_declarator" | "let_declaration" | "assignment" | "assignment_expression"
-        ) {
-            if let Some(target) = child(n, "name")
-                .or_else(|| child(n, "pattern"))
-                .or_else(|| child(n, "left"))
-            {
-                if matches!(target.kind(), "identifier" | "variable_name") {
-                    let ty = child(n, "type")
-                        .map(|ty| trim_type(snippet(ty, source)))
-                        .or_else(|| {
-                            child(n, "value")
-                                .or_else(|| child(n, "right"))
-                                .filter(|v| {
-                                    matches!(
-                                        v.kind(),
-                                        "new_expression"
-                                            | "object_creation_expression"
-                                            | "struct_expression"
-                                    )
-                                })
-                                .and_then(|v| creation_name(v, source, dialect))
-                        });
-                    if let Some(ty) = ty {
-                        local_types.insert(
-                            snippet(target, source).trim_start_matches('$').to_string(),
-                            ty,
-                        );
-                    }
-                }
-            }
-        }
-        if let Some(access) = value_access(n, Some(f), model, &local_types, source, path, dialect) {
-            accesses.push(access);
-        }
-        if (matches!(
-            n.kind(),
-            "type_identifier" | "scoped_type_identifier" | "qualified_name" | "named_type"
-        ) || python_annotation_reference(n, dialect))
-            && !php_class_reference_child(n, dialect)
-            && n.parent().is_none_or(|p| {
-                !matches!(
-                    p.kind(),
-                    "scoped_type_identifier" | "qualified_name" | "named_type"
-                )
-            })
-        {
-            facts.references.push(TypeReference {
-                name: snippet(n, source).into(),
-                kind: "type_reference".into(),
-                range: range(n, path),
-            });
-        }
-        if n.kind().contains("subscript")
-            || n.kind().contains("computed_property")
-            || snippet(n, source).starts_with("getattr(")
-        {
-            ff.dynamic_access = true;
-        }
-        if let Some((object, field)) = member(n, dialect) {
-            let dynamic_field = dialect == Dialect::Php && field.kind() != "name";
-            ff.dynamic_access |= dynamic_field;
-            if !dynamic_field && ["self", "this", "$this"].contains(&snippet(object, source).trim())
-            {
-                // Method names are not fields, even when their AST is a member expression.
-                let called = is_call(n.kind(), dialect)
-                    || n.parent().is_some_and(|p| {
-                        child(p, "function").is_some_and(|c| c.id() == n.id())
-                            || child(p, "name").is_some_and(|c| c.id() == field.id())
-                                && is_call(p.kind(), dialect)
-                    });
-                if !called {
-                    ff.own_fields
-                        .push(snippet(field, source).trim().trim_start_matches('$').into());
-                }
-            }
-        }
-        if matches!(n.kind(), "if_statement" | "if_expression") {
-            // Else-if nodes belong to their outer decision.
-            let nested_else = n.parent().is_some_and(|p| {
-                child(p, "alternative").is_some_and(|a| a.id() == n.id())
-                    || p.kind() == "else_clause"
-            });
-            if !nested_else {
-                if let Some(d) = decision(n, f, source, path, dialect) {
-                    ff.decisions.push(d);
-                }
-            }
-        }
-        if matches!(
-            n.kind(),
-            "switch_statement" | "match_expression" | "match_statement"
-        ) {
-            if let Some(d) = switch_decision(n, f, source, path, dialect) {
-                ff.decisions.push(d);
-            }
-        }
-        if matches!(
-            n.kind(),
-            "new_expression" | "object_creation_expression" | "struct_expression"
-        ) {
-            if let Some(name) = creation_name(n, source, dialect) {
-                facts.references.push(TypeReference {
-                    name,
-                    kind: "construction".into(),
-                    range: range(n, path),
-                });
-            }
-        }
-        if is_call(n.kind(), dialect) {
-            if let Some(fun) = (dialect == Dialect::Php && member(n, dialect).is_some())
-                .then_some(n)
-                .or_else(|| child(n, "function"))
-                .or_else(|| child(n, "object"))
-            {
-                let mut at = fun;
-                let mut members = Vec::new();
-                while let Some((obj, field)) = member(at, dialect) {
-                    members.push(snippet(field, source).into());
-                    at = obj;
-                }
-                if members.len() >= 3 {
-                    members.reverse();
-                    let root = snippet(at, source).trim().trim_start_matches('$');
-                    let ty = f
-                        .parameters
-                        .iter()
-                        .find(|p| p.name == root)
-                        .and_then(|p| p.type_name.clone())
-                        .or_else(|| {
-                            ["this", "self"]
-                                .contains(&root)
-                                .then(|| f.parent_type.clone())
-                                .flatten()
-                        });
-                    ff.member_chains.push(MemberChain {
-                        root_type: ty,
-                        members,
-                        range: range(n, path),
-                    });
-                    chain_roots.push((ff.member_chains.len() - 1, root));
-                }
-            }
-        }
-        if n.id() != body.id() && is_block(n) {
-            blocks.push(n);
-        }
-        stack.extend(named_children(n).into_iter().rev());
-    }
-    ff.own_fields.sort();
-    ff.own_fields.dedup();
-    for mut access in accesses {
-        let root = access
-            .receiver
-            .trim_start_matches('$')
-            .split(['.', '-', ':', '\\'])
-            .next()
-            .unwrap_or("");
-        let assigned = writes.get(root).copied().unwrap_or(0);
-        if rebound_roots.contains(root)
-            || assigned > usize::from(local_types.contains_key(root))
-            || (assigned > 0 && access.receiver_type.is_none())
-        {
-            access.receiver_type = None;
-            access.binding_unknown = true;
-        }
-        facts.value_accesses.push(access);
-    }
-    // Reassignments or lexical shadows defeat the original parameter annotation.
-    // Without a binding identity for the complete chain, keep its range but no type proof.
-    for (index, root) in chain_roots {
-        if rebound_roots.contains(root) {
-            ff.member_chains[index].root_type = None;
-        }
-    }
+    (ff, qualified_namespace.map(str::to_owned))
+}
+fn record_function_fragments(
+    body: Node<'_>,
+    blocks: Vec<Node<'_>>,
+    f: &FunctionModel,
+    source: &str,
+    path: &Path,
+    dialect: Dialect,
+    facts: &mut FileFacts,
+) {
     // Full body + disjoint innermost blocks bound representation memory to roughly 2x source.
     let block_ids = blocks.iter().map(|n| n.id()).collect::<BTreeSet<_>>();
     let candidates = blocks
@@ -540,15 +637,8 @@ fn function_facts<'tree>(
             renamed,
         });
     }
-
-    if let Some(namespace) = qualified_namespace {
-        shadows
-            .qualified_stubs
-            .push((facts.functions.len(), namespace.into()));
-    }
-    facts.functions.push(ff);
-    nested
 }
+
 fn python_docstring(n: Node<'_>, source: &str) -> bool {
     if n.kind() != "expression_statement" {
         return false;

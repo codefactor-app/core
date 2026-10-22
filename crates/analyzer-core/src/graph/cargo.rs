@@ -50,14 +50,6 @@ fn call(site: &mut CallSite, old: &str, new: &str) {
         remap(target, old, new);
     }
 }
-pub(super) fn context_module(module: &str, target: &str) -> String {
-    let escaped = target
-        .replace('%', "%25")
-        .replace('[', "%5B")
-        .replace(']', "%5D")
-        .replace(':', "%3A");
-    format!("{module}#cargo[{escaped}]")
-}
 pub(super) fn models(
     files: &[FileModel],
     resolution: &crate::resolution::ResolutionContext,

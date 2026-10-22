@@ -1,5 +1,5 @@
-use crate::analysis::LanguageRegistry;
 use crate::config::{Config, VendorParse};
+use crate::language::LanguageRegistry;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
@@ -169,41 +169,7 @@ fn compile(patterns: &[String]) -> Vec<globset::GlobMatcher> {
         .filter_map(|x| globset::Glob::new(x).ok().map(|g| g.compile_matcher()))
         .collect()
 }
-pub fn vendor_package(path: &str) -> String {
-    let parts = path.split('/').collect::<Vec<_>>();
-    // Dependency roots can be nested below a language directory. Group by the
-    // package immediately below that root rather than by the first two path
-    // components (which would collapse every python/vendor package together).
-    let count = if let Some(index) = parts.iter().position(|part| *part == "node_modules") {
-        index
-            + if parts
-                .get(index + 1)
-                .is_some_and(|name| name.starts_with('@'))
-            {
-                3
-            } else {
-                2
-            }
-    } else if let Some(index) = parts.iter().position(|part| *part == "vendor") {
-        index + 2
-    } else if let Some(index) = parts.iter().position(|part| *part == "site-packages") {
-        index + 2
-    } else if let Some(index) = parts.iter().position(|part| *part == ".venv") {
-        index + 2
-    } else {
-        2
-    };
-    let mut value = parts
-        .iter()
-        .take(count)
-        .copied()
-        .collect::<Vec<_>>()
-        .join("/");
-    if !value.contains('/') && parts.len() == 1 {
-        value = parts[0].into()
-    }
-    value
-}
+pub use crate::source::vendor_package;
 
 #[cfg(test)]
 mod tests {

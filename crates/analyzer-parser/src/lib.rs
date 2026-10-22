@@ -1,3 +1,10 @@
+mod type_index;
+use type_index::*;
+mod syntax;
+use syntax::*;
+mod support;
+use support::*;
+pub use support::{language_name, Dialect};
 mod architecture;
 mod bindings;
 mod cost;
@@ -16,7 +23,7 @@ use analyzer_core::ir::*;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use tree_sitter::{Language, Node, Parser, Tree};
 pub use types::{reference as type_reference, reference_syntax};
@@ -28,15 +35,6 @@ fn parse_key(source: &str, path: &Path, dialect: Dialect) -> u64 {
     path.hash(&mut hasher);
     dialect.hash(&mut hasher);
     hasher.finish()
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Dialect {
-    Python,
-    JavaScript,
-    TypeScript,
-    Php,
-    Rust,
 }
 
 pub fn parse(source: &str, path: &Path, language: Language, dialect: Dialect) -> RawAst {
@@ -229,77 +227,6 @@ pub fn count_lines(source: &str, dialect: Dialect) -> Loc {
     count_lines_with_comments(source, &comment_nodes(tree.root_node()))
 }
 
-/// The grammar distinguishes comments from literal contents, including template
-/// substitutions, raw strings, heredocs, and Python multiline strings.
-fn comment_nodes(root: Node<'_>) -> Vec<Node<'_>> {
-    let mut comments = Vec::new();
-    let mut pending = vec![root];
-    while let Some(node) = pending.pop() {
-        if matches!(node.kind(), "comment" | "line_comment" | "block_comment") {
-            comments.push(node);
-        } else {
-            pending.extend(named_children(node).into_iter().rev());
-        }
-    }
-    comments.sort_by_key(Node::start_byte);
-    comments
-}
-
-fn count_lines_with_comments(source: &str, comments: &[Node<'_>]) -> Loc {
-    let mut loc = Loc::default();
-    let mut offset = 0;
-    let mut comment_index = 0;
-    for line in source.split_inclusive('\n') {
-        loc.total += 1;
-        let trimmed = if offset == 0 {
-            line.trim_start_matches('\u{feff}').trim()
-        } else {
-            line.trim()
-        };
-        if trimmed.is_empty() {
-            loc.blank += 1;
-        } else {
-            let mut has_code = false;
-            for (column, ch) in line.char_indices() {
-                if ch.is_whitespace() || (offset == 0 && column == 0 && ch == '\u{feff}') {
-                    continue;
-                }
-                let byte = offset + column;
-                while comments
-                    .get(comment_index)
-                    .is_some_and(|node| node.end_byte() <= byte)
-                {
-                    comment_index += 1;
-                }
-                if comments
-                    .get(comment_index)
-                    .is_none_or(|node| node.start_byte() > byte)
-                {
-                    has_code = true;
-                    break;
-                }
-            }
-            if has_code {
-                loc.code += 1;
-            } else {
-                loc.comment += 1;
-            }
-        }
-        offset += line.len();
-    }
-    loc
-}
-
-pub fn language_name(dialect: Dialect) -> &'static str {
-    match dialect {
-        Dialect::Python => "python",
-        Dialect::JavaScript => "javascript",
-        Dialect::TypeScript => "typescript",
-        Dialect::Php => "php",
-        Dialect::Rust => "rust",
-    }
-}
-
 pub fn resolve_call(call: &CallSite, file: &FileModel, dialect: Dialect) -> Vec<String> {
     if call.binding_unknown {
         return Vec::new();
@@ -344,7 +271,7 @@ pub fn resolve_call(call: &CallSite, file: &FileModel, dialect: Dialect) -> Vec<
     for import in file
         .imports
         .iter()
-        .filter(|i| bindings::applies(i, &call.range))
+        .filter(|i| crate::support::import_applies(i, &call.range))
     {
         let short = import.alias.as_deref().or_else(|| {
             import
@@ -361,439 +288,41 @@ pub fn resolve_call(call: &CallSite, file: &FileModel, dialect: Dialect) -> Vec<
     candidates
 }
 
-/// One borrowed type index per file; scope lookup walks only the owner's ancestors.
-struct TypeIndex<'a> {
-    full: BTreeMap<&'a str, &'a String>,
-    namespaces: BTreeMap<&'a str, BTreeMap<&'a str, &'a String>>,
-    separator: &'static str,
+// Explicit body frames keep normalization iterative on deeply nested inputs.
+enum BodyWork<'tree> {
+    Enter(Node<'tree>, Arc<[Guard]>, Arc<[LoopContext]>, usize),
+    Children {
+        node: Node<'tree>,
+        children: std::vec::IntoIter<Node<'tree>>,
+        guards: Arc<[Guard]>,
+        loops: Arc<[LoopContext]>,
+        depth: usize,
+    },
 }
-impl<'a> TypeIndex<'a> {
-    fn new(types: &'a [TypeModel], dialect: Dialect) -> Self {
-        let separator = match dialect {
-            Dialect::Rust => "::",
-            Dialect::Php => "\\",
-            _ => ".",
-        };
-        let mut full = BTreeMap::new();
-        let mut namespaces = BTreeMap::<_, BTreeMap<_, _>>::new();
-        for ty in types
-            .iter()
-            .filter(|t| !matches!(t.kind, TypeKind::Namespace | TypeKind::Impl))
-        {
-            full.insert(ty.fqn.as_str(), &ty.fqn);
-            if let Some(parent) = ty
-                .fqn
-                .strip_suffix(&ty.name)
-                .and_then(|p| p.strip_suffix(separator))
-            {
-                namespaces
-                    .entry(parent)
-                    .or_default()
-                    .entry(ty.name.as_str())
-                    .or_insert(&ty.fqn);
-            }
-        }
-        Self {
-            full,
-            namespaces,
-            separator,
+struct BodyEntry<'tree> {
+    node: Node<'tree>,
+    guards: Arc<[Guard]>,
+    loops: Arc<[LoopContext]>,
+    depth: usize,
+}
+struct BodyChildren<'tree> {
+    node: Node<'tree>,
+    children: std::vec::IntoIter<Node<'tree>>,
+    guards: Arc<[Guard]>,
+    loops: Arc<[LoopContext]>,
+    depth: usize,
+}
+impl<'tree> BodyChildren<'tree> {
+    fn into_work(self) -> BodyWork<'tree> {
+        BodyWork::Children {
+            node: self.node,
+            children: self.children,
+            guards: self.guards,
+            loops: self.loops,
+            depth: self.depth,
         }
     }
-    fn scope<'b>(&'b self, owner: &'b str) -> ScopedTypes<'b, 'a> {
-        ScopedTypes { index: self, owner }
-    }
 }
-struct ScopedTypes<'a, 'types> {
-    index: &'a TypeIndex<'types>,
-    owner: &'a str,
-}
-impl ScopedTypes<'_, '_> {
-    fn get(&self, name: &str) -> Option<&String> {
-        if self.index.separator == "\\" {
-            if let Some(absolute) = name.strip_prefix('\\') {
-                return self.index.full.get(absolute).copied();
-            }
-        }
-        if let Some(ty) = self.index.full.get(name) {
-            return Some(ty);
-        }
-        let mut context = self.owner;
-        while let Some((parent, _)) = context.rsplit_once(self.index.separator) {
-            if let Some(ty) = self
-                .index
-                .namespaces
-                .get(parent)
-                .and_then(|types| types.get(name))
-            {
-                return Some(ty);
-            }
-            context = parent;
-        }
-        None
-    }
-    fn contains_key(&self, name: &str) -> bool {
-        self.get(name).is_some()
-    }
-}
-
-fn module_name(path: &Path, dialect: Dialect) -> String {
-    let mut p = path.with_extension("").to_string_lossy().replace('\\', "/");
-    if p.ends_with("/__init__") {
-        p.truncate(p.len() - 9);
-    }
-    match dialect {
-        Dialect::Php => p.replace('/', "\\"),
-        Dialect::Rust => p.replace('/', "::"),
-        Dialect::Python => p.replace('/', "."),
-        Dialect::JavaScript | Dialect::TypeScript => p,
-    }
-}
-
-thread_local! {
-    static RANGE_PATH: RefCell<Option<(PathBuf, Arc<str>)>> = const { RefCell::new(None) };
-}
-fn range_path(path: &Path) -> Arc<str> {
-    RANGE_PATH.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        if let Some((previous, shared)) = slot.as_ref() {
-            if previous == path {
-                return shared.clone();
-            }
-        }
-        let shared: Arc<str> = path.to_string_lossy().as_ref().into();
-        *slot = Some((path.to_path_buf(), shared.clone()));
-        shared
-    })
-}
-fn range(node: Node<'_>, path: &Path) -> SourceRange {
-    let a = node.start_position();
-    let b = node.end_position();
-    SourceRange {
-        file: range_path(path),
-        start_line: a.row + 1,
-        start_column: a.column + 1,
-        end_line: b.row + 1,
-        end_column: b.column + 1,
-    }
-}
-fn snippet<'a>(node: Node<'_>, source: &'a str) -> &'a str {
-    source.get(node.byte_range()).unwrap_or("")
-}
-fn child<'a>(node: Node<'a>, field: &str) -> Option<Node<'a>> {
-    node.child_by_field_name(field)
-}
-fn named_children(node: Node<'_>) -> Vec<Node<'_>> {
-    let mut c = node.walk();
-    node.named_children(&mut c).collect()
-}
-fn first_kind<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
-    let mut cursor = node.walk();
-    let found = node
-        .named_children(&mut cursor)
-        .find(|n| kinds.contains(&n.kind()));
-    found
-}
-fn text_field(node: Node<'_>, field: &str, source: &str) -> Option<String> {
-    child(node, field).map(|n| snippet(n, source).to_string())
-}
-
-// Static JS/TS import/export strings use ECMAScript string values, not source spelling.
-// Invalid escapes, legacy octal and lone UTF-16 surrogates cannot prove a module path.
-fn js_module_literal(raw: &str) -> Option<String> {
-    let quote = raw.as_bytes().first().copied()?;
-    if !matches!(quote, b'\'' | b'"') || raw.as_bytes().last().copied()? != quote || raw.len() < 2 {
-        return None;
-    }
-    let mut chars = raw[1..raw.len() - 1].chars().peekable();
-    let mut value = String::with_capacity(raw.len() - 2);
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            if matches!(c, '\n' | '\r') {
-                return None;
-            }
-            value.push(c);
-            continue;
-        }
-        let escaped = chars.next()?;
-        match escaped {
-            '\n' | '\u{2028}' | '\u{2029}' => {}
-            '\r' => {
-                if chars.peek() == Some(&'\n') {
-                    chars.next();
-                }
-            }
-            'n' => value.push('\n'),
-            'r' => value.push('\r'),
-            't' => value.push('\t'),
-            'b' => value.push('\u{8}'),
-            'f' => value.push('\u{c}'),
-            'v' => value.push('\u{b}'),
-            '0' if !chars.peek().is_some_and(|c| c.is_ascii_digit()) => value.push('\0'),
-            '0'..='9' => return None,
-            'x' => {
-                let mut code = 0;
-                for _ in 0..2 {
-                    code = code * 16 + chars.next()?.to_digit(16)?;
-                }
-                value.push(char::from_u32(code)?);
-            }
-            'u' => {
-                let mut code = 0u32;
-                if chars.peek() == Some(&'{') {
-                    chars.next();
-                    let mut digits = 0;
-                    loop {
-                        let c = chars.next()?;
-                        if c == '}' {
-                            if digits == 0 {
-                                return None;
-                            }
-                            break;
-                        }
-                        code = code.checked_mul(16)?.checked_add(c.to_digit(16)?)?;
-                        digits += 1;
-                    }
-                } else {
-                    for _ in 0..4 {
-                        code = code * 16 + chars.next()?.to_digit(16)?;
-                    }
-                    if (0xd800..=0xdbff).contains(&code) {
-                        if chars.next()? != '\\' || chars.next()? != 'u' {
-                            return None;
-                        }
-                        let mut low = 0;
-                        for _ in 0..4 {
-                            low = low * 16 + chars.next()?.to_digit(16)?;
-                        }
-                        if !(0xdc00..=0xdfff).contains(&low) {
-                            return None;
-                        }
-                        code = 0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00);
-                    }
-                }
-                value.push(char::from_u32(code)?);
-            }
-            // Quotes, backslashes and valid ECMAScript NonEscapeCharacters.
-            c => value.push(c),
-        }
-    }
-    Some(value)
-}
-
-fn ast_kind(kind: &str, dialect: Dialect) -> AstKind {
-    if is_function(kind, dialect) {
-        AstKind::Function
-    } else if is_type(kind, dialect) {
-        AstKind::Type
-    } else if is_call(kind, dialect) {
-        AstKind::Call
-    } else if is_branch(kind) {
-        AstKind::Branch
-    } else if is_loop(kind) {
-        AstKind::Loop
-    } else if kind.contains("return") {
-        AstKind::Return
-    } else if ["module", "source_file", "program", "php_tag"].contains(&kind) {
-        AstKind::File
-    } else {
-        AstKind::Other(kind.into())
-    }
-}
-// Detailed owned ASTs and optional cost inference have finite recursive stack
-// budgets. Normal metric and binding traversal uses explicit work stacks.
-const MAX_RECURSIVE_DEPTH: usize = 256;
-fn exceeds_recursive_depth(node: Node<'_>) -> bool {
-    let mut pending = vec![(node, 0usize)];
-    while let Some((node, depth)) = pending.pop() {
-        if depth > MAX_RECURSIVE_DEPTH {
-            return true;
-        }
-        let mut cursor = node.walk();
-        pending.extend(
-            node.named_children(&mut cursor)
-                .map(|child| (child, depth + 1)),
-        );
-    }
-    false
-}
-
-fn ast_node(
-    node: Node<'_>,
-    source: &str,
-    path: &Path,
-    dialect: Dialect,
-    errors: &mut Vec<ParseError>,
-) -> AstNode {
-    if node.is_error() || node.is_missing() {
-        errors.push(ParseError {
-            message: format!("syntax error: {}", node.kind()),
-            range: range(node, path),
-        });
-    }
-    let mut cursor = node.walk();
-    let children = node
-        .named_children(&mut cursor)
-        .map(|n| ast_node(n, source, path, dialect, errors))
-        .collect();
-    let text = if node.named_child_count() == 0 {
-        Some(snippet(node, source).chars().take(160).collect())
-    } else {
-        None
-    };
-    AstNode {
-        kind: ast_kind(node.kind(), dialect),
-        raw_kind: node.kind().into(),
-        range: range(node, path),
-        text,
-        children,
-    }
-}
-fn collect_errors(node: Node<'_>, path: &Path, errors: &mut Vec<ParseError>) {
-    let mut pending = vec![node];
-    while let Some(node) = pending.pop() {
-        if !node.has_error() && !node.is_error() && !node.is_missing() {
-            continue;
-        }
-        if node.is_error() || node.is_missing() {
-            errors.push(ParseError {
-                message: format!("syntax error: {}", node.kind()),
-                range: range(node, path),
-            });
-        }
-        // Missing punctuation is often an anonymous child. Named-only traversal
-        // silently loses recovered delimiters such as ')' and '}'.
-        let mut cursor = node.walk();
-        let children = node.children(&mut cursor).collect::<Vec<_>>();
-        pending.extend(children.into_iter().rev());
-    }
-}
-
-fn is_function(kind: &str, d: Dialect) -> bool {
-    match d {
-        Dialect::Python => ["function_definition", "lambda"].contains(&kind),
-        Dialect::JavaScript | Dialect::TypeScript => [
-            "function_declaration",
-            "generator_function_declaration",
-            "function_expression",
-            "generator_function",
-            "arrow_function",
-            "method_definition",
-            "function_signature",
-            "method_signature",
-            "abstract_method_signature",
-        ]
-        .contains(&kind),
-        Dialect::Php => [
-            "function_definition",
-            "method_declaration",
-            "anonymous_function",
-            "arrow_function",
-        ]
-        .contains(&kind),
-        Dialect::Rust => [
-            "function_item",
-            "function_signature_item",
-            "closure_expression",
-        ]
-        .contains(&kind),
-    }
-}
-fn is_type(kind: &str, d: Dialect) -> bool {
-    match d {
-        Dialect::Python => kind == "class_definition",
-        Dialect::JavaScript => ["class_declaration", "class"].contains(&kind),
-        Dialect::TypeScript => [
-            "class_declaration",
-            "abstract_class_declaration",
-            "class",
-            "interface_declaration",
-            "enum_declaration",
-            "internal_module",
-        ]
-        .contains(&kind),
-        Dialect::Php => [
-            "class_declaration",
-            "trait_declaration",
-            "interface_declaration",
-            "enum_declaration",
-            "anonymous_class",
-        ]
-        .contains(&kind),
-        Dialect::Rust => [
-            "struct_item",
-            "enum_item",
-            "trait_item",
-            "impl_item",
-            "mod_item",
-            "type_item",
-        ]
-        .contains(&kind),
-    }
-}
-fn is_call(kind: &str, d: Dialect) -> bool {
-    match d {
-        Dialect::Python => kind == "call",
-        Dialect::JavaScript | Dialect::TypeScript => {
-            ["call_expression", "new_expression"].contains(&kind)
-        }
-        Dialect::Php => [
-            "function_call_expression",
-            "member_call_expression",
-            "nullsafe_member_call_expression",
-            "scoped_call_expression",
-            "object_creation_expression",
-        ]
-        .contains(&kind),
-        Dialect::Rust => ["call_expression", "macro_invocation"].contains(&kind),
-    }
-}
-fn is_branch(kind: &str) -> bool {
-    [
-        "if_statement",
-        "if_expression",
-        "elif_clause",
-        "else_clause",
-        "switch_statement",
-        "switch_case",
-        "switch_default",
-        "match_expression",
-        "match_statement",
-        "match_arm",
-        "case_clause",
-        "try_statement",
-        "except_clause",
-        "catch_clause",
-        "finally_clause",
-        "conditional_expression",
-        "ternary_expression",
-        "match_conditional_expression",
-        "match_default_expression",
-        "binary_expression",
-        "binary_operator",
-        "boolean_operator",
-    ]
-    .contains(&kind)
-}
-fn is_loop(kind: &str) -> bool {
-    [
-        "for_statement",
-        "for_in_statement",
-        "for_expression",
-        "for_in_clause",
-        "while_statement",
-        "while_expression",
-        "loop_expression",
-        "do_statement",
-        "do_while_statement",
-        "foreach_statement",
-        "list_comprehension",
-        "dictionary_comprehension",
-        "set_comprehension",
-        "generator_expression",
-    ]
-    .contains(&kind)
-}
-
 struct State<'a> {
     source: &'a str,
     path: &'a Path,
@@ -1491,6 +1020,7 @@ impl State<'_> {
             range: range(node, self.path),
             ..Default::default()
         };
+        typ.is_abstract = is_abstract_type(node, &typ.kind);
         typ.decorators = decorators(node, self.source);
         if self.dialect == Dialect::Rust {
             typ.rust_cfg = rust_conditions(node, self.source);
@@ -1866,6 +1396,69 @@ impl State<'_> {
         parent_type: Option<&str>,
         parent_function: Option<&str>,
     ) -> String {
+        let (name, fqn) = self.function_identity(node, parent_type, parent_function);
+        let (mut function, body_node, params) =
+            self.function_model(node, parent_type, parent_function, name, &fqn);
+        self.rust_function_modifiers(node, params, &mut function);
+        self.js_function_modifiers(node, params, &mut function);
+        self.other_function_modifiers(node, params, &mut function);
+        self.walk_body(body_node, &mut function, &[], &[], 0);
+        function.cognitive_complexity =
+            Some(cognitive_complexity(body_node, self.source, self.dialect));
+        self.attach_function_cost(body_node, &mut function);
+        self.attach_function_fields(body_node, params, &mut function);
+        self.register_function_method(parent_function, &function);
+        self.model.functions.push(function);
+        fqn
+    }
+    fn function_identity(
+        &mut self,
+        node: Node<'_>,
+        parent_type: Option<&str>,
+        parent_function: Option<&str>,
+    ) -> (String, String) {
+        let name = self.function_name(node);
+        let owner = parent_function
+            .or(parent_type)
+            .unwrap_or(if self.dialect == Dialect::Php {
+                &self.namespace
+            } else if self.namespace.is_empty() {
+                &self.model.module
+            } else {
+                &self.namespace
+            });
+        let sep = if parent_type.is_some() && parent_function.is_none() {
+            match self.dialect {
+                Dialect::Php | Dialect::Rust => "::",
+                _ => ".",
+            }
+        } else {
+            match self.dialect {
+                Dialect::Php => "\\",
+                Dialect::Rust => "::",
+                _ => ".",
+            }
+        };
+        // Reserve identity delimiters while preserving the actual decoded property name.
+        let identity_name = if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript)
+            && properties::declared_name(node, self.source).is_some()
+        {
+            name.replace('%', "%25")
+                .replace('#', "%23")
+                .replace('.', "%2E")
+        } else {
+            name.clone()
+        };
+        let mut fqn = if owner.is_empty() {
+            identity_name.clone()
+        } else {
+            format!("{owner}{sep}{identity_name}")
+        };
+        self.qualify_object_function(node, parent_type, owner, sep, &identity_name, &mut fqn);
+        self.function_identity_suffix(node, parent_type, parent_function, &mut fqn);
+        (name, fqn)
+    }
+    fn function_name(&mut self, node: Node<'_>) -> String {
         let name = matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript)
             .then(|| properties::descriptor_function_name(node, self.source))
             .flatten()
@@ -1907,47 +1500,22 @@ impl State<'_> {
                 self.anonymous += 1;
                 format!("<lambda_{}>", self.anonymous)
             });
-        let name = if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript) {
+
+        if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript) {
             properties::declared_name(node, self.source).unwrap_or(name)
         } else {
             name
-        };
-        let owner = parent_function
-            .or(parent_type)
-            .unwrap_or(if self.dialect == Dialect::Php {
-                &self.namespace
-            } else if self.namespace.is_empty() {
-                &self.model.module
-            } else {
-                &self.namespace
-            });
-        let sep = if parent_type.is_some() && parent_function.is_none() {
-            match self.dialect {
-                Dialect::Php | Dialect::Rust => "::",
-                _ => ".",
-            }
-        } else {
-            match self.dialect {
-                Dialect::Php => "\\",
-                Dialect::Rust => "::",
-                _ => ".",
-            }
-        };
-        // Reserve identity delimiters while preserving the actual decoded property name.
-        let identity_name = if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript)
-            && properties::declared_name(node, self.source).is_some()
-        {
-            name.replace('%', "%25")
-                .replace('#', "%23")
-                .replace('.', "%2E")
-        } else {
-            name.clone()
-        };
-        let mut fqn = if owner.is_empty() {
-            identity_name.clone()
-        } else {
-            format!("{owner}{sep}{identity_name}")
-        };
+        }
+    }
+    fn qualify_object_function(
+        &self,
+        node: Node<'_>,
+        parent_type: Option<&str>,
+        owner: &str,
+        sep: &str,
+        identity_name: &str,
+        fqn: &mut String,
+    ) {
         // Object members are separate declarations from a lexical variable or
         // imported function of the same spelling (e.g. API.dispatch vs dispatch).
         if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript)
@@ -1963,7 +1531,7 @@ impl State<'_> {
                 }
                 if parent.kind() == "assignment_expression" {
                     if let Some(binding) = child(parent, "left") {
-                        fqn = format!(
+                        *fqn = format!(
                             "{owner}{sep}{}{sep}{identity_name}",
                             snippet(binding, self.source)
                         );
@@ -1974,7 +1542,7 @@ impl State<'_> {
                     if let Some(binding) =
                         child(parent, "name").filter(|binding| binding.kind() == "identifier")
                     {
-                        fqn = format!(
+                        *fqn = format!(
                             "{owner}{sep}{}{sep}{identity_name}",
                             snippet(binding, self.source)
                         );
@@ -1984,6 +1552,14 @@ impl State<'_> {
                 ancestor = parent.parent();
             }
         }
+    }
+    fn function_identity_suffix(
+        &self,
+        node: Node<'_>,
+        parent_type: Option<&str>,
+        parent_function: Option<&str>,
+        fqn: &mut String,
+    ) {
         // Static methods execute on a class object, independently of instance members.
         if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript)
             && accessor_keyword(node).is_none()
@@ -2009,6 +1585,15 @@ impl State<'_> {
                 fqn.push_str(keyword);
             }
         }
+    }
+    fn function_model<'tree>(
+        &self,
+        node: Node<'tree>,
+        parent_type: Option<&str>,
+        parent_function: Option<&str>,
+        name: String,
+        fqn: &str,
+    ) -> (FunctionModel, Node<'tree>, Option<Node<'tree>>) {
         let parent_type = parent_type.filter(|owner| {
             !self
                 .model
@@ -2050,9 +1635,9 @@ impl State<'_> {
                 cleaned
             }
         });
-        let mut function = FunctionModel {
+        let function = FunctionModel {
             name,
-            fqn: fqn.clone(),
+            fqn: fqn.to_owned(),
             range: range(node, self.path),
             body_range: range(body_node, self.path),
             parent_type: parent_type.map(str::to_owned),
@@ -2067,6 +1652,16 @@ impl State<'_> {
             normalized_ast: None,
             ..Default::default()
         };
+        (function, body_node, params)
+    }
+    fn rust_function_modifiers(
+        &self,
+        node: Node<'_>,
+        _params: Option<Node<'_>>,
+        function: &mut FunctionModel,
+    ) {
+        let parent_function = function.parent_function.as_deref();
+        let parent_type = function.parent_type.clone();
         if self.dialect == Dialect::Rust {
             function.rust_cfg = rust_conditions(node, self.source);
             if parent_function.is_none() {
@@ -2103,6 +1698,13 @@ impl State<'_> {
                 }
             }
         }
+    }
+    fn js_function_modifiers(
+        &self,
+        node: Node<'_>,
+        _params: Option<Node<'_>>,
+        function: &mut FunctionModel,
+    ) {
         if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript)
             && node.kind() == "arrow_function"
         {
@@ -2123,6 +1725,13 @@ impl State<'_> {
                 ancestor = owner.parent();
             }
         }
+    }
+    fn other_function_modifiers(
+        &self,
+        node: Node<'_>,
+        _params: Option<Node<'_>>,
+        function: &mut FunctionModel,
+    ) {
         function.modifiers.extend(decorators(node, self.source));
         if self.dialect == Dialect::Python
             && function
@@ -2138,11 +1747,10 @@ impl State<'_> {
             function.modifiers.push("generator".into());
         }
         if self.dialect == Dialect::Php {
-            apply_phpdoc(node, self.source, &mut function);
+            apply_phpdoc(node, self.source, function);
         }
-        self.walk_body(body_node, &mut function, &[], &[], 0);
-        function.cognitive_complexity =
-            Some(cognitive_complexity(body_node, self.source, self.dialect));
+    }
+    fn attach_function_cost(&self, body_node: Node<'_>, function: &mut FunctionModel) {
         // Cost inference still uses recursive expression evaluators. Bound this
         // optional representation before entering any of them; normal metrics,
         // runtime operations and bindings remain complete for deep bodies.
@@ -2156,7 +1764,7 @@ impl State<'_> {
         } else if self.dialect == Dialect::Rust {
             cost::extract(
                 body_node,
-                &function,
+                function,
                 self.source,
                 self.path,
                 &self.cost_type_shadows,
@@ -2164,7 +1772,7 @@ impl State<'_> {
         } else {
             cost_dynamic::extract(
                 body_node,
-                &function,
+                function,
                 self.source,
                 self.path,
                 self.dialect,
@@ -2172,12 +1780,21 @@ impl State<'_> {
                 !self.namespace.is_empty(),
             )
         }));
+    }
+    fn attach_function_fields(
+        &self,
+        body_node: Node<'_>,
+        params: Option<Node<'_>>,
+        function: &mut FunctionModel,
+    ) {
+        let parent_function = function.parent_function.as_deref();
+        let parent_type = function.parent_type.as_deref();
         let mut fields = BTreeSet::new();
         collect_accessed_fields(
             body_node,
             self.source,
             self.dialect,
-            &receiver_names(&function, self.dialect),
+            &receiver_names(function, self.dialect),
             &mut fields,
         );
         // A promoted constructor parameter is an implicit `$this->x = $x` /
@@ -2196,7 +1813,15 @@ impl State<'_> {
             }
         }
         function.accessed_fields = fields.into_iter().collect();
-        function.accessor = classify_accessor(body_node, &function, self.source, self.dialect);
+        function.accessor = classify_accessor(body_node, function, self.source, self.dialect);
+    }
+    fn register_function_method(
+        &mut self,
+        parent_function: Option<&str>,
+        function: &FunctionModel,
+    ) {
+        let parent_type = function.parent_type.as_deref();
+        let fqn = &function.fqn;
         if parent_type.is_some() && parent_function.is_none() {
             if let Some(t) = self
                 .model
@@ -2207,9 +1832,8 @@ impl State<'_> {
                 t.methods.push(fqn.clone());
             }
         }
-        self.model.functions.push(function);
-        fqn
     }
+
     fn parameters(&self, node: Node<'_>, method: bool) -> Vec<Parameter> {
         let mut out = Vec::new();
         let mut children_cursor = node.walk();
@@ -2285,304 +1909,422 @@ impl State<'_> {
         loops: &[LoopContext],
         depth: usize,
     ) {
-        // Resume sibling traversal after each child, retaining source order and
-        // the early-exit guards inherited only by subsequent siblings. Contexts
-        // are shared so expression depth does not clone branch environments.
-        enum Work<'tree> {
-            Enter(Node<'tree>, Arc<[Guard]>, Arc<[LoopContext]>, usize),
-            Children {
-                node: Node<'tree>,
-                children: std::vec::IntoIter<Node<'tree>>,
-                guards: Arc<[Guard]>,
-                loops: Arc<[LoopContext]>,
-                depth: usize,
-            },
-        }
-        let mut pending = vec![Work::Enter(node, guards.into(), loops.into(), depth)];
+        let mut pending = vec![BodyWork::Enter(node, guards.into(), loops.into(), depth)];
         while let Some(work) = pending.pop() {
-            let (node, mut children, mut tail_guards, loops, depth) = match work {
-                Work::Enter(node, guards, loops, depth) => {
-                    let kind = node.kind();
-                    if function.is_module_initializer() {
-                        let runtime = if is_function(kind, self.dialect) {
-                            if self.dialect == Dialect::Python {
-                                [child(node, "parameters"), child(node, "return_type")]
-                                    .into_iter()
-                                    .flatten()
-                                    .collect()
-                            } else {
-                                Vec::new()
-                            }
-                        } else if matches!(
-                            kind,
-                            "import_statement"
-                                | "import_require_clause"
-                                | "type_annotation"
-                                | "type_query"
-                                | "type_alias_declaration"
-                                | "interface_declaration"
-                                | "ambient_declaration"
-                                | "function_type"
-                                | "constructor_type"
-                        ) || (self.dialect == Dialect::Php && is_type(kind, self.dialect))
-                        {
-                            Vec::new()
-                        } else if self.dialect == Dialect::Python && kind == "class_definition" {
-                            [child(node, "superclasses"), child(node, "body")]
-                                .into_iter()
-                                .flatten()
-                                .collect()
-                        } else if matches!(
-                            kind,
-                            "class" | "class_declaration" | "abstract_class_declaration"
-                        ) {
-                            self.module_class_runtime_nodes(node)
-                        } else {
-                            if self.dialect == Dialect::Python && kind == "decorator" {
-                                if let Some(expression) = named_children(node).first().copied() {
-                                    let raw = snippet(expression, self.source);
-                                    let (receiver, name, call_kind) =
-                                        split_call(raw, "call", self.dialect);
-                                    let factory = is_call(expression.kind(), self.dialect);
-                                    function.calls.push(CallSite {
-                                        name: if factory {
-                                            "<decorator_result>".into()
-                                        } else {
-                                            name
-                                        },
-                                        receiver: if factory { None } else { receiver },
-                                        kind: if factory {
-                                            CallKind::Dynamic
-                                        } else {
-                                            call_kind
-                                        },
-                                        binding_unknown: factory,
-                                        range: range(expression, self.path),
-                                        guard: guards.clone(),
-                                        in_loop: loops.clone(),
-                                        ..Default::default()
-                                    });
-                                }
-                            }
-                            // Ordinary nodes are handled below.
-                            Vec::new()
-                        };
-                        if is_function(kind, self.dialect)
-                            || (self.dialect == Dialect::Php && is_type(kind, self.dialect))
-                            || (self.dialect == Dialect::Python && kind == "class_definition")
-                            || matches!(
-                                kind,
-                                "import_statement"
-                                    | "import_require_clause"
-                                    | "type_annotation"
-                                    | "type_query"
-                                    | "type_alias_declaration"
-                                    | "interface_declaration"
-                                    | "ambient_declaration"
-                                    | "function_type"
-                                    | "constructor_type"
-                                    | "class"
-                                    | "class_declaration"
-                                    | "abstract_class_declaration"
-                            )
-                        {
-                            pending.extend(runtime.into_iter().rev().map(|node| {
-                                Work::Enter(node, guards.clone(), loops.clone(), depth)
-                            }));
-                            continue;
-                        }
-                    }
-                    if node.id() != function.body_range.start_line as usize
-                        && is_function(kind, self.dialect)
-                        && node.start_position().row + 1 != function.range.start_line
-                    {
-                        continue;
-                    }
-                    if ["return_statement", "return_expression"].contains(&kind) {
-                        function.return_points += 1;
-                    }
-                    if is_call(kind, self.dialect) {
-                        function.calls.push(self.call_site(node, &guards, &loops));
-                    }
-                    if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript) {
-                        function.property_accesses.extend(properties::collect(
-                            node,
-                            self.source,
-                            self.path,
-                            &guards,
-                            &loops,
-                        ));
-                        function.property_mutations.extend(properties::mutations(
-                            node,
-                            self.source,
-                            self.path,
-                            &guards,
-                            &loops,
-                        ));
-                    }
-                    function.nesting_depth = function.nesting_depth.max(depth);
-                    if branch_complexity(kind) || is_logical_binary(node, self.source) {
-                        function.complexity += 1;
-                    }
-                    (node, named_children(node).into_iter(), guards, loops, depth)
+            if let Some(frame) = self.enter_body(work, function, &mut pending) {
+                self.visit_body_child(frame, function, &mut pending);
+            }
+        }
+    }
+    fn enter_body<'tree>(
+        &mut self,
+        work: BodyWork<'tree>,
+        function: &mut FunctionModel,
+        pending: &mut Vec<BodyWork<'tree>>,
+    ) -> Option<BodyChildren<'tree>> {
+        match work {
+            BodyWork::Children {
+                node,
+                children,
+                guards,
+                loops,
+                depth,
+            } => Some(BodyChildren {
+                node,
+                children,
+                guards,
+                loops,
+                depth,
+            }),
+            BodyWork::Enter(node, guards, loops, depth) => {
+                let kind = node.kind();
+                if self.enter_initializer(
+                    BodyEntry {
+                        node,
+                        guards: guards.clone(),
+                        loops: loops.clone(),
+                        depth,
+                    },
+                    function,
+                    pending,
+                ) {
+                    return None;
                 }
-                Work::Children {
+                if node.id() != function.body_range.start_line as usize
+                    && is_function(kind, self.dialect)
+                    && node.start_position().row + 1 != function.range.start_line
+                {
+                    return None;
+                }
+                if ["return_statement", "return_expression"].contains(&kind) {
+                    function.return_points += 1;
+                }
+                if is_call(kind, self.dialect) {
+                    function.calls.push(self.call_site(node, &guards, &loops));
+                }
+                if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript) {
+                    function.property_accesses.extend(properties::collect(
+                        node,
+                        self.source,
+                        self.path,
+                        &guards,
+                        &loops,
+                    ));
+                    function.property_mutations.extend(properties::mutations(
+                        node,
+                        self.source,
+                        self.path,
+                        &guards,
+                        &loops,
+                    ));
+                }
+                function.nesting_depth = function.nesting_depth.max(depth);
+                if branch_complexity(kind) || is_logical_binary(node, self.source) {
+                    function.complexity += 1;
+                }
+                Some(BodyChildren {
                     node,
-                    children,
+                    children: named_children(node).into_iter(),
                     guards,
                     loops,
                     depth,
-                } => (node, children, guards, loops, depth),
-            };
-            let Some(c) = children.next() else { continue };
-            let kind = node.kind();
-            if c.id() != node.id() && is_function(c.kind(), self.dialect) {
-                pending.push(Work::Children {
-                    node,
-                    children,
-                    guards: tail_guards.clone(),
-                    loops: loops.clone(),
-                    depth,
-                });
-                if function.is_module_initializer() && self.dialect == Dialect::Python {
-                    pending.push(Work::Enter(c, tail_guards, loops, depth));
-                } else if function.is_module_initializer()
-                    && c.kind() == "method_definition"
-                    && kind == "object"
-                {
-                    if let Some(key) =
-                        child(c, "name").filter(|key| key.kind() == "computed_property_name")
-                    {
-                        pending.push(Work::Enter(key, tail_guards, loops, depth));
-                    }
+                })
+            }
+        }
+    }
+    fn enter_initializer<'tree>(
+        &mut self,
+        entry: BodyEntry<'tree>,
+        function: &mut FunctionModel,
+        pending: &mut Vec<BodyWork<'tree>>,
+    ) -> bool {
+        let BodyEntry {
+            node,
+            guards,
+            loops,
+            depth,
+        } = entry;
+        let kind = node.kind();
+        if function.is_module_initializer() {
+            let runtime = if is_function(kind, self.dialect) {
+                if self.dialect == Dialect::Python {
+                    [child(node, "parameters"), child(node, "return_type")]
+                        .into_iter()
+                        .flatten()
+                        .collect()
+                } else {
+                    Vec::new()
                 }
-                continue;
-            }
-            if [
-                "list_comprehension",
-                "dictionary_comprehension",
-                "set_comprehension",
-                "generator_expression",
-            ]
-            .contains(&kind)
-                && c.kind() == "if_clause"
+            } else if matches!(
+                kind,
+                "import_statement"
+                    | "import_require_clause"
+                    | "type_annotation"
+                    | "type_query"
+                    | "type_alias_declaration"
+                    | "interface_declaration"
+                    | "ambient_declaration"
+                    | "function_type"
+                    | "constructor_type"
+            ) || (self.dialect == Dialect::Php && is_type(kind, self.dialect))
             {
-                pending.push(Work::Children {
-                    node,
-                    children,
-                    guards: tail_guards,
-                    loops,
-                    depth,
-                });
-                continue;
-            }
-            let mut g = tail_guards.clone();
-            let mut l = loops.clone();
-            let mut d = depth;
-            if is_loop(kind) {
-                let mut contexts = l.to_vec();
-                contexts.push(LoopContext {
-                    header: loop_header(node, self.source),
-                    line: node.start_position().row + 1,
-                    range: range(node, self.path),
-                });
-                l = contexts.into();
-                d += 1;
-            }
-            if kind == "if_statement"
-                && self.dialect == Dialect::Python
-                && matches!(c.kind(), "elif_clause" | "else_clause")
-            {
-                for previous in named_children(node)
+                Vec::new()
+            } else if self.dialect == Dialect::Python && kind == "class_definition" {
+                [child(node, "superclasses"), child(node, "body")]
                     .into_iter()
-                    .take_while(|n| n.id() != c.id())
-                {
-                    if previous.kind() == "elif_clause" {
-                        if let Some(condition) = child(previous, "condition") {
-                            let raw = snippet(condition, self.source).trim();
-                            let mut guard =
-                                make_guard("If", raw, "else", range(previous, self.path));
-                            guard.normalized = negate_condition(raw);
-                            let mut contexts = g.to_vec();
-                            contexts.push(guard);
-                            g = contexts.into();
-                        }
-                    }
-                }
-            }
-            if is_branch(kind) {
-                if let Some(guard) = self.guard_for(node, c) {
-                    let mut contexts = g.to_vec();
-                    contexts.insert(tail_guards.len(), guard);
-                    g = contexts.into();
-                    d += 1;
-                }
-            }
-            if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript) {
-                if let Some(guard) =
-                    properties::logical_assignment_guard(node, c, self.source, self.path)
-                {
-                    let mut contexts = g.to_vec();
-                    contexts.push(guard);
-                    g = contexts.into();
-                }
-            }
-            if [
-                "block",
-                "statement_block",
-                "compound_statement",
-                "declaration_list",
-                "module",
-                "program",
-                "source_file",
-            ]
-            .contains(&kind)
-                && ["if_statement", "if_expression"].contains(&c.kind())
-                && child(c, "alternative").is_none()
+                    .flatten()
+                    .collect()
+            } else if matches!(
+                kind,
+                "class" | "class_declaration" | "abstract_class_declaration"
+            ) {
+                self.module_class_runtime_nodes(node)
+            } else {
+                self.record_decorator_call(node, function, &guards, &loops);
+                // Ordinary nodes are handled below.
+                Vec::new()
+            };
+            if is_function(kind, self.dialect)
+                || (self.dialect == Dialect::Php && is_type(kind, self.dialect))
+                || (self.dialect == Dialect::Python && kind == "class_definition")
+                || matches!(
+                    kind,
+                    "import_statement"
+                        | "import_require_clause"
+                        | "type_annotation"
+                        | "type_query"
+                        | "type_alias_declaration"
+                        | "interface_declaration"
+                        | "ambient_declaration"
+                        | "function_type"
+                        | "constructor_type"
+                        | "class"
+                        | "class_declaration"
+                        | "abstract_class_declaration"
+                )
             {
-                if let Some(consequence) = child(c, "consequence").or_else(|| child(c, "body")) {
-                    if contains_terminator(consequence) {
-                        if let Some(condition) = child(c, "condition") {
-                            let raw = snippet(condition, self.source).trim();
-                            let mut guard =
-                                make_guard("EarlyExit", raw, "after_exit", range(c, self.path));
-                            guard.normalized = negate_condition(raw);
-                            let mut contexts = tail_guards.to_vec();
-                            contexts.push(guard);
-                            tail_guards = contexts.into();
-                        }
-                    }
-                }
+                pending.extend(
+                    runtime
+                        .into_iter()
+                        .rev()
+                        .map(|node| BodyWork::Enter(node, guards.clone(), loops.clone(), depth)),
+                );
+                return true;
             }
-            if [
-                "block",
-                "statement_block",
-                "compound_statement",
-                "declaration_list",
-            ]
-            .contains(&kind)
-            {
-                if let Some(try_node) = find_unconditional_try(c) {
-                    let raw = snippet(try_node, self.source).trim();
-                    let mut contexts = tail_guards.to_vec();
-                    contexts.push(make_guard(
-                        "ShortCircuit",
-                        raw,
-                        "success",
-                        range(try_node, self.path),
-                    ));
-                    tail_guards = contexts.into();
-                }
+        }
+        false
+    }
+    fn record_decorator_call(
+        &self,
+        node: Node<'_>,
+        function: &mut FunctionModel,
+        guards: &Arc<[Guard]>,
+        loops: &Arc<[LoopContext]>,
+    ) {
+        if self.dialect == Dialect::Python && node.kind() == "decorator" {
+            if let Some(expression) = named_children(node).first().copied() {
+                let raw = snippet(expression, self.source);
+                let (receiver, name, call_kind) = split_call(raw, "call", self.dialect);
+                let factory = is_call(expression.kind(), self.dialect);
+                function.calls.push(CallSite {
+                    name: if factory {
+                        "<decorator_result>".into()
+                    } else {
+                        name
+                    },
+                    receiver: if factory { None } else { receiver },
+                    kind: if factory {
+                        CallKind::Dynamic
+                    } else {
+                        call_kind
+                    },
+                    binding_unknown: factory,
+                    range: range(expression, self.path),
+                    guard: guards.clone(),
+                    in_loop: loops.clone(),
+                    ..Default::default()
+                });
             }
-            pending.push(Work::Children {
+        }
+    }
+    fn skip_nested_body<'tree>(
+        &mut self,
+        frame: &mut BodyChildren<'tree>,
+        c: Node<'tree>,
+        function: &FunctionModel,
+        pending: &mut Vec<BodyWork<'tree>>,
+    ) -> bool {
+        let node = frame.node;
+        let kind = node.kind();
+        let tail_guards = frame.guards.clone();
+        let loops = frame.loops.clone();
+        let depth = frame.depth;
+        if c.id() != node.id() && is_function(c.kind(), self.dialect) {
+            pending.push(BodyWork::Children {
                 node,
-                children,
+                children: std::mem::take(&mut frame.children),
+                guards: tail_guards.clone(),
+                loops: loops.clone(),
+                depth,
+            });
+            if function.is_module_initializer() && self.dialect == Dialect::Python {
+                pending.push(BodyWork::Enter(c, tail_guards, loops, depth));
+            } else if function.is_module_initializer()
+                && c.kind() == "method_definition"
+                && kind == "object"
+            {
+                if let Some(key) =
+                    child(c, "name").filter(|key| key.kind() == "computed_property_name")
+                {
+                    pending.push(BodyWork::Enter(key, tail_guards, loops, depth));
+                }
+            }
+            return true;
+        }
+        false
+    }
+    fn skip_comprehension_condition<'tree>(
+        &mut self,
+        frame: &mut BodyChildren<'tree>,
+        c: Node<'tree>,
+        _function: &FunctionModel,
+        pending: &mut Vec<BodyWork<'tree>>,
+    ) -> bool {
+        let node = frame.node;
+        let kind = node.kind();
+        let tail_guards = frame.guards.clone();
+        let loops = frame.loops.clone();
+        let depth = frame.depth;
+        if [
+            "list_comprehension",
+            "dictionary_comprehension",
+            "set_comprehension",
+            "generator_expression",
+        ]
+        .contains(&kind)
+            && c.kind() == "if_clause"
+        {
+            pending.push(BodyWork::Children {
+                node,
+                children: std::mem::take(&mut frame.children),
                 guards: tail_guards,
                 loops,
                 depth,
             });
-            pending.push(Work::Enter(c, g, l, d));
+            return true;
         }
+        false
+    }
+    fn body_child_context<'tree>(
+        &self,
+        frame: &BodyChildren<'tree>,
+        c: Node<'tree>,
+    ) -> BodyEntry<'tree> {
+        let node = frame.node;
+        let kind = node.kind();
+        let tail_guards = &frame.guards;
+        let loops = &frame.loops;
+        let depth = frame.depth;
+        let mut g = tail_guards.clone();
+        let mut l = loops.clone();
+        let mut d = depth;
+        if is_loop(kind) {
+            let mut contexts = l.to_vec();
+            contexts.push(LoopContext {
+                header: loop_header(node, self.source),
+                line: node.start_position().row + 1,
+                range: range(node, self.path),
+            });
+            l = contexts.into();
+            d += 1;
+        }
+        if kind == "if_statement"
+            && self.dialect == Dialect::Python
+            && matches!(c.kind(), "elif_clause" | "else_clause")
+        {
+            for previous in named_children(node)
+                .into_iter()
+                .take_while(|n| n.id() != c.id())
+            {
+                if previous.kind() == "elif_clause" {
+                    if let Some(condition) = child(previous, "condition") {
+                        let raw = snippet(condition, self.source).trim();
+                        let mut guard = make_guard("If", raw, "else", range(previous, self.path));
+                        guard.normalized = negate_condition(raw);
+                        let mut contexts = g.to_vec();
+                        contexts.push(guard);
+                        g = contexts.into();
+                    }
+                }
+            }
+        }
+        if is_branch(kind) {
+            if let Some(guard) = self.guard_for(node, c) {
+                let mut contexts = g.to_vec();
+                contexts.insert(tail_guards.len(), guard);
+                g = contexts.into();
+                d += 1;
+            }
+        }
+        if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript) {
+            if let Some(guard) =
+                properties::logical_assignment_guard(node, c, self.source, self.path)
+            {
+                let mut contexts = g.to_vec();
+                contexts.push(guard);
+                g = contexts.into();
+            }
+        }
+        BodyEntry {
+            node: c,
+            guards: g,
+            loops: l,
+            depth: d,
+        }
+    }
+    fn record_early_exit<'tree>(&self, frame: &mut BodyChildren<'tree>, c: Node<'tree>) {
+        let node = frame.node;
+        let kind = node.kind();
+        let mut tail_guards = frame.guards.clone();
+        if [
+            "block",
+            "statement_block",
+            "compound_statement",
+            "declaration_list",
+            "module",
+            "program",
+            "source_file",
+        ]
+        .contains(&kind)
+            && ["if_statement", "if_expression"].contains(&c.kind())
+            && child(c, "alternative").is_none()
+        {
+            if let Some(consequence) = child(c, "consequence").or_else(|| child(c, "body")) {
+                if contains_terminator(consequence) {
+                    if let Some(condition) = child(c, "condition") {
+                        let raw = snippet(condition, self.source).trim();
+                        let mut guard =
+                            make_guard("EarlyExit", raw, "after_exit", range(c, self.path));
+                        guard.normalized = negate_condition(raw);
+                        let mut contexts = tail_guards.to_vec();
+                        contexts.push(guard);
+                        tail_guards = contexts.into();
+                    }
+                }
+            }
+        }
+        frame.guards = tail_guards;
+    }
+    fn record_try_success<'tree>(&self, frame: &mut BodyChildren<'tree>, c: Node<'tree>) {
+        let node = frame.node;
+        let kind = node.kind();
+        let mut tail_guards = frame.guards.clone();
+        if [
+            "block",
+            "statement_block",
+            "compound_statement",
+            "declaration_list",
+        ]
+        .contains(&kind)
+        {
+            if let Some(try_node) = find_unconditional_try(c) {
+                let raw = snippet(try_node, self.source).trim();
+                let mut contexts = tail_guards.to_vec();
+                contexts.push(make_guard(
+                    "ShortCircuit",
+                    raw,
+                    "success",
+                    range(try_node, self.path),
+                ));
+                tail_guards = contexts.into();
+            }
+        }
+        frame.guards = tail_guards;
+    }
+    fn visit_body_child<'tree>(
+        &mut self,
+        mut frame: BodyChildren<'tree>,
+        function: &mut FunctionModel,
+        pending: &mut Vec<BodyWork<'tree>>,
+    ) {
+        let Some(c) = frame.children.next() else {
+            return;
+        };
+        if self.skip_nested_body(&mut frame, c, function, pending)
+            || self.skip_comprehension_condition(&mut frame, c, function, pending)
+        {
+            return;
+        }
+        let entry = self.body_child_context(&frame, c);
+        self.record_early_exit(&mut frame, c);
+        self.record_try_success(&mut frame, c);
+        pending.push(frame.into_work());
+        pending.push(BodyWork::Enter(
+            entry.node,
+            entry.guards,
+            entry.loops,
+            entry.depth,
+        ));
     }
 
     fn module_class_runtime_nodes<'tree>(&self, node: Node<'tree>) -> Vec<Node<'tree>> {
@@ -3161,201 +2903,9 @@ impl State<'_> {
     }
 }
 
-fn make_guard(kind: &str, raw: &str, branch: &str, range: SourceRange) -> Guard {
-    Guard {
-        kind: kind.into(),
-        raw: raw.into(),
-        normalized: normalize_condition(raw),
-        branch: branch.into(),
-        range,
-    }
-}
-fn contains_terminator(mut node: Node<'_>) -> bool {
-    loop {
-        if [
-            "return_statement",
-            "return_expression",
-            "throw_statement",
-            "raise_statement",
-            "continue_statement",
-            "break_statement",
-        ]
-        .contains(&node.kind())
-        {
-            return true;
-        }
-        if !["block", "statement_block", "compound_statement"].contains(&node.kind()) {
-            return false;
-        }
-        let Some(last) = named_children(node).last().copied() else {
-            return false;
-        };
-        node = last;
-    }
-}
 // A fallible expression inside a branch, loop, or closure need not execute.
 // Do not impose its success condition on subsequent sibling statements.
-fn find_unconditional_try(node: Node<'_>) -> Option<Node<'_>> {
-    let mut pending = vec![node];
-    while let Some(node) = pending.pop() {
-        if node.kind() == "try_expression" {
-            return Some(node);
-        }
-        if is_branch(node.kind())
-            || is_loop(node.kind())
-            || [
-                Dialect::Python,
-                Dialect::JavaScript,
-                Dialect::TypeScript,
-                Dialect::Php,
-                Dialect::Rust,
-            ]
-            .into_iter()
-            .any(|dialect| is_function(node.kind(), dialect))
-        {
-            continue;
-        }
-        pending.extend(named_children(node).into_iter().rev());
-    }
-    None
-}
-fn find_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
-    let mut pending = vec![node];
-    while let Some(node) = pending.pop() {
-        if node.kind() == kind {
-            return Some(node);
-        }
-        pending.extend(named_children(node).into_iter().rev());
-    }
-    None
-}
-fn negate_condition(raw: &str) -> String {
-    let normalized = normalize_condition(raw);
-    let inverted = normalize_condition(&format!("!({normalized})"));
-    if inverted == format!("!({normalized})") {
-        if normalized
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '$')
-        {
-            format!("!{normalized}")
-        } else {
-            inverted
-        }
-    } else {
-        inverted
-    }
-}
-pub fn normalize_condition(raw: &str) -> String {
-    let s = raw.trim();
-    let s = strip_parens(s);
-    let symbolic_negation = s.starts_with('!');
-    let neg = s.strip_prefix('!').or_else(|| s.strip_prefix("not "));
-    if let Some(rest) = neg {
-        let inner = strip_parens(rest.trim());
-        if let Some(x) = inner
-            .strip_prefix('!')
-            .or_else(|| inner.strip_prefix("not "))
-        {
-            return strip_parens(x.trim()).into();
-        }
-        if let Some((index, operator)) = (!symbolic_negation || inner != rest.trim())
-            .then(|| single_comparison(inner))
-            .flatten()
-        {
-            let opposite = match operator {
-                "===" => "!==",
-                "!==" => "===",
-                // Ordering is not total for NaN, and equality/inequality can
-                // be overloaded independently. Text alone cannot prove their
-                // complements. Strict equality operators are complements.
-                _ => return s.into(),
-            };
-            return format!(
-                "{} {} {}",
-                inner[..index].trim(),
-                opposite,
-                inner[index + operator.len()..].trim()
-            );
-        }
-    }
-    s.into()
-}
-fn single_comparison(condition: &str) -> Option<(usize, &'static str)> {
-    let bytes = condition.as_bytes();
-    let mut index = 0;
-    let mut depth = 0usize;
-    let mut quoted = None;
-    let mut escaped = false;
-    let mut comparison = None;
-    while index < bytes.len() {
-        let character = condition[index..].chars().next()?;
-        if let Some(quote) = quoted {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == quote {
-                quoted = None;
-            }
-            index += character.len_utf8();
-            continue;
-        }
-        if matches!(character, '\'' | '"' | '`') {
-            quoted = Some(character);
-            index += 1;
-            continue;
-        }
-        if matches!(character, '(' | '[' | '{') {
-            depth += 1;
-            index += 1;
-            continue;
-        }
-        if matches!(character, ')' | ']' | '}') {
-            depth = depth.saturating_sub(1);
-            index += 1;
-            continue;
-        }
-        if depth == 0 {
-            let rest = &condition[index..];
-            if rest.starts_with("=>") {
-                return None;
-            }
-            if rest.starts_with("&&")
-                || rest.starts_with("||")
-                || rest.starts_with("??")
-                || rest.starts_with('?')
-                || word_at(condition, index, "and")
-                || word_at(condition, index, "or")
-            {
-                return None;
-            }
-            let operator = ["===", "!==", ">=", "<=", "==", "!=", ">", "<"]
-                .into_iter()
-                .find(|operator| rest.starts_with(operator));
-            if let Some(operator) = operator {
-                if comparison.is_some()
-                    || index == 0
-                    || condition[index + operator.len()..].trim().is_empty()
-                {
-                    return None;
-                }
-                comparison = Some((index, operator));
-                index += operator.len();
-                continue;
-            }
-        }
-        index += character.len_utf8();
-    }
-    comparison
-}
-fn word_at(source: &str, index: usize, word: &str) -> bool {
-    let bytes = source.as_bytes();
-    source[index..].starts_with(word)
-        && (index == 0 || !bytes[index - 1].is_ascii_alphanumeric() && bytes[index - 1] != b'_')
-        && (index + word.len() == bytes.len()
-            || !bytes[index + word.len()].is_ascii_alphanumeric()
-                && bytes[index + word.len()] != b'_')
-}
+
 #[cfg(test)]
 mod condition_normalization_tests {
     use super::normalize_condition;
@@ -3392,904 +2942,6 @@ mod condition_normalization_tests {
         }
         assert_eq!(normalize_condition("!(!(ready))"), "ready");
     }
-}
-fn strip_parens(mut s: &str) -> &str {
-    loop {
-        let t = s.trim();
-        if t.starts_with('(') && t.ends_with(')') {
-            let mut depth = 0;
-            let mut wraps = true;
-            for (i, ch) in t.char_indices() {
-                if ch == '(' {
-                    depth += 1
-                } else if ch == ')' {
-                    depth -= 1;
-                    if depth == 0 && i < t.len() - 1 {
-                        wraps = false;
-                        break;
-                    }
-                }
-            }
-            if wraps && depth == 0 {
-                s = &t[1..t.len() - 1];
-                continue;
-            }
-        }
-        return t;
-    }
-}
-fn branch_complexity(k: &str) -> bool {
-    [
-        "if_statement",
-        "if_expression",
-        "elif_clause",
-        "switch_case",
-        "case_clause",
-        "match_arm",
-        "match_conditional_expression",
-        "catch_clause",
-        "except_clause",
-        "for_statement",
-        "for_in_statement",
-        "foreach_statement",
-        "for_expression",
-        "while_statement",
-        "while_expression",
-        "do_statement",
-        "do_while_statement",
-        "loop_expression",
-        "conditional_expression",
-        "ternary_expression",
-        "boolean_operator",
-    ]
-    .contains(&k)
-}
-fn is_logical_binary(node: Node<'_>, source: &str) -> bool {
-    if !["binary_expression", "binary_operator"].contains(&node.kind()) {
-        return false;
-    }
-    let operator = child(node, "operator")
-        .map(|n| snippet(n, source).trim())
-        .or_else(|| {
-            let left = child(node, "left")?;
-            let right = child(node, "right")?;
-            source
-                .get(left.end_byte()..right.start_byte())
-                .map(str::trim)
-        });
-    matches!(operator, Some("&&" | "||" | "??" | "and" | "or"))
-}
-fn loop_header(node: Node<'_>, src: &str) -> String {
-    if [
-        "list_comprehension",
-        "dictionary_comprehension",
-        "set_comprehension",
-        "generator_expression",
-    ]
-    .contains(&node.kind())
-    {
-        if let Some(for_clause) = find_kind(node, "for_in_clause") {
-            return snippet(for_clause, src).trim().into();
-        }
-    }
-    let raw = snippet(node, src);
-    raw.lines()
-        .next()
-        .unwrap_or(raw)
-        .trim()
-        .trim_end_matches(['{', ':'])
-        .trim()
-        .into()
-}
-fn signature(node: Node<'_>, body: Option<Node<'_>>, src: &str) -> String {
-    let raw = if let Some(b) = body {
-        src.get(node.start_byte()..b.start_byte()).unwrap_or("")
-    } else {
-        snippet(node, src)
-    };
-    raw.trim().chars().take(300).collect()
-}
-/// Name of a constructor parameter that also declares a property: PHP
-/// constructor promotion or a TypeScript parameter property (accessibility,
-/// `override` or `readonly` modifier, possibly after decorators).
-fn promoted_parameter_name(p: Node<'_>, source: &str) -> Option<String> {
-    let promoted = match p.kind() {
-        "property_promotion_parameter" => true,
-        "required_parameter" | "optional_parameter" => {
-            let mut cursor = p.walk();
-            let found = p.children(&mut cursor).any(|c| {
-                matches!(
-                    c.kind(),
-                    "accessibility_modifier" | "override_modifier" | "readonly"
-                )
-            });
-            found
-        }
-        "simple_parameter" => php_readonly_promotion_type(p, source).is_some(),
-        _ => false,
-    };
-    if !promoted {
-        return None;
-    }
-    let name = child(p, "name")
-        .or_else(|| child(p, "pattern").filter(|n| n.kind() == "identifier"))
-        .or_else(|| first_kind(p, &["identifier", "variable_name"]))?;
-    let name = snippet(name, source).trim_start_matches(['&', '$']);
-    (!name.is_empty()).then(|| name.to_string())
-}
-/// Declared type of a PHP `readonly` promoted parameter without a visibility
-/// modifier (`readonly Foo $x`). tree-sitter-php has no node for this form and
-/// recovers it as a `simple_parameter` whose type text starts with `readonly`
-/// (`readonly` as a type name followed by an ERROR node), or with an ERROR
-/// `readonly` node inside the parameter or right before it.
-fn php_readonly_promotion_type(p: Node<'_>, source: &str) -> Option<String> {
-    if p.kind() != "simple_parameter" {
-        return None;
-    }
-    let start = first_kind(p, &["attribute_list"]).map_or(p.start_byte(), |a| a.end_byte());
-    let head = source.get(start..child(p, "name")?.start_byte())?.trim();
-    if let Some(declared) = head
-        .get(..8)
-        .filter(|kw| kw.eq_ignore_ascii_case("readonly"))
-        .map(|_| &head[8..])
-        .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
-    {
-        return Some(declared.trim().trim_end_matches('&').trim().to_string());
-    }
-    let is_readonly =
-        |n: Node<'_>| n.is_error() && snippet(n, source).eq_ignore_ascii_case("readonly");
-    let mut cursor = p.walk();
-    let error_inside = p.named_children(&mut cursor).any(is_readonly);
-    (error_inside || p.prev_named_sibling().is_some_and(is_readonly))
-        .then(|| text_field(p, "type", source).unwrap_or_default())
-}
-fn visibility(raw: &str) -> Option<String> {
-    for v in ["private", "protected", "public"] {
-        if raw.trim_start().starts_with(v) {
-            return Some(v.into());
-        }
-    }
-    None
-}
-fn decorators(node: Node<'_>, source: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut children_cursor = node.walk();
-    for c in node.named_children(&mut children_cursor) {
-        if ["decorator", "attribute_list", "attribute_group"].contains(&c.kind()) {
-            out.push(snippet(c, source).trim().into())
-        }
-    }
-    if let Some(p) = node.parent() {
-        if p.kind() == "decorated_definition" {
-            let mut children_cursor = p.walk();
-            for c in p.named_children(&mut children_cursor) {
-                if c.kind() == "decorator" {
-                    out.push(snippet(c, source).trim().into())
-                }
-            }
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-fn modifiers(node: Node<'_>, src: &str) -> Vec<String> {
-    let text = snippet(node, src);
-    let head = text.split(['(', '{']).next().unwrap_or(text);
-    let words = head.split_whitespace().collect::<Vec<_>>();
-    let mut out = [
-        "async",
-        "static",
-        "pub",
-        "private",
-        "protected",
-        "abstract",
-        "generator",
-    ]
-    .into_iter()
-    .filter(|m| words.contains(m))
-    .map(str::to_owned)
-    .collect::<Vec<_>>();
-    if accessor_keyword(node).is_some() {
-        out.push("accessor".into());
-    }
-    out
-}
-fn accessor_keyword(node: Node<'_>) -> Option<&'static str> {
-    if !matches!(
-        node.kind(),
-        "method_definition" | "method_signature" | "abstract_method_signature"
-    ) {
-        return None;
-    }
-    let mut cursor = node.walk();
-    let keyword = node
-        .children(&mut cursor)
-        .find_map(|child| match child.kind() {
-            "get" => Some("get"),
-            "set" => Some("set"),
-            _ => None,
-        });
-    keyword
-}
-
-fn rust_attributes<'a>(node: Node<'_>, source: &'a str) -> Vec<&'a str> {
-    let mut attributes = Vec::new();
-    let mut previous = node.prev_named_sibling();
-    while let Some(sibling) = previous {
-        previous = sibling.prev_named_sibling();
-        if matches!(sibling.kind(), "line_comment" | "block_comment") {
-            continue;
-        }
-        if sibling.kind() != "attribute_item" {
-            break;
-        }
-        if let Some(attribute) = first_kind(sibling, &["attribute"]) {
-            attributes.push(snippet(attribute, source).trim());
-        }
-    }
-    attributes.reverse();
-    attributes
-}
-fn rust_conditions(node: Node<'_>, source: &str) -> Vec<String> {
-    let mut conditions = Vec::new();
-    let mut current = Some(node);
-    while let Some(owner) = current {
-        let mut attributes = rust_attributes(owner, source);
-        let containers = std::iter::once(owner).chain(child(owner, "body"));
-        for container in containers {
-            for item in named_children(container)
-                .into_iter()
-                .filter(|child| child.kind() == "inner_attribute_item")
-            {
-                if let Some(attribute) = first_kind(item, &["attribute"]) {
-                    attributes.push(snippet(attribute, source).trim());
-                }
-            }
-        }
-        for attribute in attributes {
-            // `#[test]` and harness attributes such as `#[tokio::test]` compile
-            // their item only in a `cfg(test)` build.
-            let path = attribute.split('(').next().unwrap_or(attribute).trim();
-            if path == "test" || path.ends_with("::test") {
-                conditions.push("test".to_owned());
-            } else if let Some(condition) = attribute
-                .strip_prefix("cfg")
-                .map(str::trim)
-                .and_then(|tail| tail.strip_prefix('('))
-                .and_then(|tail| tail.strip_suffix(')'))
-            {
-                conditions.push(condition.to_owned());
-            } else if let Some(arguments) = attribute
-                .strip_prefix("cfg_attr")
-                .map(str::trim)
-                .and_then(|tail| tail.strip_prefix('('))
-                .and_then(|tail| tail.strip_suffix(')'))
-            {
-                let pieces = analyzer_core::resolution::split_arguments(arguments);
-                if let Some(condition) = pieces.first() {
-                    for attr in pieces.iter().skip(1) {
-                        if let Some(inner) = attr
-                            .strip_prefix("cfg")
-                            .map(str::trim)
-                            .and_then(|tail| tail.strip_prefix('('))
-                            .and_then(|tail| tail.strip_suffix(')'))
-                        {
-                            conditions.push(format!("any(not({condition}), {inner})"));
-                        }
-                    }
-                }
-            }
-        }
-        current = owner.parent();
-    }
-    conditions
-}
-fn rust_module_path(node: Node<'_>, source: &str) -> Option<String> {
-    rust_attributes(node, source)
-        .into_iter()
-        .find_map(|attribute| {
-            let (key, value) = attribute.split_once('=')?;
-            (key.trim() == "path").then(|| rust_path_literal(value.trim()))?
-        })
-}
-fn rust_path_literal(raw: &str) -> Option<String> {
-    if raw.starts_with('r') {
-        let start = raw.find('"')?;
-        let end = raw.rfind('"')?;
-        return Some(raw[start + 1..end].to_string());
-    }
-    let quoted = raw.strip_prefix('"')?.strip_suffix('"')?;
-    let mut decoded = String::new();
-    let mut chars = quoted.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            decoded.push(ch);
-        } else {
-            decoded.push(match chars.next()? {
-                '\\' => '\\',
-                '"' => '"',
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                '0' => '\0',
-                _ => return None,
-            });
-        }
-    }
-    Some(decoded)
-}
-
-fn rust_is_public(node: Node<'_>, source: &str) -> bool {
-    named_children(node).into_iter().any(|child| {
-        child.kind() == "visibility_modifier" && snippet(child, source).trim() == "pub"
-    })
-}
-
-fn rust_path_in_module(reference: &str, module: &str, base: &str) -> String {
-    if let Some(tail) = reference.strip_prefix("crate::") {
-        return format!("{base}::{tail}");
-    }
-    if let Some(tail) = reference.strip_prefix("self::") {
-        return format!("{module}::{tail}");
-    }
-    let mut context = module;
-    let mut tail = reference;
-    while let Some(rest) = tail.strip_prefix("super::") {
-        context = context
-            .rsplit_once("::")
-            .map_or(context, |(parent, _)| parent);
-        tail = rest;
-    }
-    if reference.starts_with("::") {
-        reference.trim_start_matches("::").into()
-    } else {
-        format!("{context}::{tail}")
-    }
-}
-
-/// Codefactor's structural cognitive score: decisions add 1 + control nesting;
-/// else/elif and each boolean operator sequence add 1. Calls have no effect.
-/// This intentionally does not claim compatibility with Sonar's metric.
-fn cognitive_complexity(body: Node<'_>, source: &str, dialect: Dialect) -> usize {
-    let mut total = 0;
-    let mut pending = vec![(body, 0_usize)];
-    while let Some((node, nesting)) = pending.pop() {
-        if node.id() != body.id() && is_function(node.kind(), dialect) {
-            continue;
-        }
-        let kind = node.kind();
-        let is_if = matches!(kind, "if_statement" | "if_expression");
-        let else_if = is_if
-            && node.parent().is_some_and(|parent| {
-                parent.kind() == "else_clause"
-                    || (matches!(parent.kind(), "if_statement" | "if_expression")
-                        && child(parent, "alternative").is_some_and(|alt| alt.id() == node.id()))
-            });
-        let decision = is_if
-            || matches!(
-                kind,
-                "switch_statement"
-                    | "match_expression"
-                    | "match_statement"
-                    | "conditional_expression"
-                    | "ternary_expression"
-                    | "catch_clause"
-                    | "except_clause"
-                    | "if_clause"
-            )
-            || (is_loop(kind)
-                && !matches!(
-                    kind,
-                    "list_comprehension"
-                        | "dictionary_comprehension"
-                        | "set_comprehension"
-                        | "generator_expression"
-                ));
-        let mut child_nesting = nesting;
-        if else_if || kind == "elif_clause" {
-            total += 1;
-        } else if decision {
-            total += 1 + nesting;
-            child_nesting += 1;
-        } else if kind == "else_clause"
-            && !named_children(node)
-                .iter()
-                .any(|child| matches!(child.kind(), "if_statement" | "if_expression"))
-        {
-            total += 1;
-        }
-        if is_if {
-            if let Some(alternative) = child(node, "alternative") {
-                if !matches!(
-                    alternative.kind(),
-                    "else_clause" | "if_statement" | "if_expression"
-                ) {
-                    total += 1;
-                }
-            }
-        }
-        if let Some(operator) = boolean_operator(node, source) {
-            let mut parent = node.parent();
-            while parent.is_some_and(|node| node.kind() == "parenthesized_expression") {
-                parent = parent.and_then(|node| node.parent());
-            }
-            if parent.and_then(|node| boolean_operator(node, source)) != Some(operator) {
-                total += 1;
-            }
-        }
-        pending.extend(
-            named_children(node)
-                .into_iter()
-                .rev()
-                .map(|child| (child, child_nesting)),
-        );
-    }
-    total
-}
-
-fn boolean_operator<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
-    let operator = snippet(child(node, "operator")?, source);
-    matches!(operator, "&&" | "||" | "and" | "or" | "xor").then_some(operator)
-}
-fn heritage_types(node: Node<'_>, source: &str, dialect: Dialect) -> Vec<String> {
-    named_children(node)
-        .into_iter()
-        .filter(|n| n.kind() != "type_arguments")
-        .filter_map(|n| crate::types::reference(language_name(dialect), snippet(n, source)))
-        .collect()
-}
-fn trim_type(raw: &str) -> String {
-    raw.trim()
-        .trim_start_matches(':')
-        .trim_start_matches(['?', '\\'])
-        .trim()
-        .trim_start_matches('&')
-        .trim_start_matches('?')
-        .trim()
-        .trim_end_matches('?')
-        .to_string()
-}
-fn rust_trait_bounds(node: Node<'_>, source: &str) -> BTreeMap<String, String> {
-    let mut bounds = BTreeMap::new();
-    for field in ["type_parameters", "where_clause"] {
-        let Some(part) = child(node, field).or_else(|| first_kind(node, &[field])) else {
-            continue;
-        };
-        let raw = snippet(part, source)
-            .trim()
-            .trim_start_matches('<')
-            .trim_end_matches('>')
-            .trim_start_matches("where")
-            .trim();
-        for entry in raw.split(',') {
-            let Some((name, bound)) = entry.split_once(':') else {
-                continue;
-            };
-            let name = name.trim();
-            let bound = bound.split('+').next().unwrap_or(bound).trim();
-            if !name.is_empty() && !bound.is_empty() && !name.starts_with('\'') {
-                bounds.insert(name.to_string(), bound.to_string());
-            }
-        }
-    }
-    bounds
-}
-fn parameter_type(raw: &str, d: Dialect) -> Option<String> {
-    match d {
-        Dialect::Rust => raw.split_once(':').map(|(_, r)| trim_type(r)),
-        Dialect::TypeScript | Dialect::JavaScript | Dialect::Python => raw
-            .split_once(':')
-            .map(|(_, r)| trim_type(r.split('=').next().unwrap_or(r))),
-        Dialect::Php => raw.split_once('$').and_then(|(prefix, _)| {
-            let prefix = prefix.trim().trim_end_matches("...").trim();
-            let prefix = prefix.trim_end_matches('&').trim();
-            let annotation = prefix
-                .split_whitespace()
-                .filter(|word| !matches!(*word, "public" | "protected" | "private" | "readonly"))
-                .collect::<Vec<_>>()
-                .join(" ");
-            (!annotation.is_empty()).then_some(annotation)
-        }),
-    }
-}
-fn apply_phpdoc(node: Node<'_>, source: &str, function: &mut FunctionModel) {
-    let Some(previous) = node.prev_named_sibling() else {
-        return;
-    };
-    if previous.kind() != "comment" || previous.end_position().row + 2 < node.start_position().row {
-        return;
-    }
-    let parts = snippet(previous, source)
-        .split_whitespace()
-        .collect::<Vec<_>>();
-    for (index, token) in parts.iter().enumerate() {
-        match *token {
-            "@return" => {
-                if function.return_type.is_none() {
-                    if let Some(ty) = parts.get(index + 1) {
-                        function.return_type = Some(ty.trim_end_matches("*/").into())
-                    }
-                }
-            }
-            "@param" => {
-                if let (Some(ty), Some(name)) = (parts.get(index + 1), parts.get(index + 2)) {
-                    let name = name.trim_start_matches('$');
-                    if let Some(p) = function.parameters.iter_mut().find(|p| {
-                        p.name == name
-                            && (p.type_name.is_none() || p.type_name.as_deref() == Some("$"))
-                    }) {
-                        p.type_name = Some((*ty).into())
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-}
-fn phpdoc_var(node: Node<'_>, source: &str) -> Option<String> {
-    let prev = node.prev_named_sibling()?;
-    if prev.kind() != "comment" || prev.end_position().row + 2 < node.start_position().row {
-        return None;
-    }
-    let parts = snippet(prev, source).split_whitespace().collect::<Vec<_>>();
-    parts
-        .windows(2)
-        .find(|w| w[0] == "@var")
-        .map(|w| w[1].trim_end_matches("*/").to_string())
-}
-fn parse_import(raw: &str, d: Dialect, full: &str) -> (String, Option<String>) {
-    match d {
-        Dialect::Python => {
-            let val = raw.trim_start_matches("import ").trim();
-            let (p, a) = val
-                .split_once(" as ")
-                .map(|(p, a)| (p.trim(), Some(a.trim().to_string())))
-                .unwrap_or((val, None));
-            let prefix = if full.trim_start().starts_with("from ") {
-                full.trim_start()
-                    .strip_prefix("from ")
-                    .and_then(|x| x.split_once(" import "))
-                    .map(|(p, _)| p)
-                    .unwrap_or("")
-            } else {
-                ""
-            };
-            (
-                if prefix.is_empty() {
-                    p.into()
-                } else if prefix.chars().all(|c| c == '.') {
-                    format!("{prefix}{p}")
-                } else {
-                    format!("{prefix}.{p}")
-                },
-                a,
-            )
-        }
-        Dialect::JavaScript | Dialect::TypeScript => {
-            (raw.trim_matches(['\'', '"', '`']).into(), None)
-        }
-        Dialect::Php => {
-            let (p, a) = raw
-                .split_once(" as ")
-                .map(|(p, a)| (p.trim(), Some(a.trim().to_string())))
-                .unwrap_or((raw, None));
-            (
-                p.trim_start_matches("use ")
-                    .trim_start_matches("function ")
-                    .trim_start_matches("const ")
-                    .trim_start_matches('\\')
-                    .into(),
-                a,
-            )
-        }
-        Dialect::Rust => (
-            raw.trim_start_matches("use ").trim_end_matches(';').into(),
-            None,
-        ),
-    }
-}
-fn split_call(raw: &str, node_kind: &str, d: Dialect) -> (Option<String>, String, CallKind) {
-    if node_kind == "macro_invocation" {
-        return (None, raw.trim_end_matches('!').into(), CallKind::Macro);
-    }
-    if ["new_expression", "object_creation_expression"].contains(&node_kind) {
-        return (
-            None,
-            raw.trim_start_matches("new ").trim().into(),
-            CallKind::Constructor,
-        );
-    }
-    let raw = raw.trim();
-    for (sep, kind) in [
-        ("?->", CallKind::Method),
-        ("->", CallKind::Method),
-        ("::", CallKind::Static),
-        ("?.", CallKind::Method),
-        (".", CallKind::Method),
-    ] {
-        if let Some((left, right)) = raw.rsplit_once(sep) {
-            return (
-                Some(left.trim().trim_start_matches('$').into()),
-                right.trim().into(),
-                kind,
-            );
-        }
-    }
-    if d == Dialect::Php && raw.starts_with('$') {
-        return (None, raw.trim_start_matches('$').into(), CallKind::Dynamic);
-    }
-    (None, raw.into(), CallKind::Function)
-}
-fn assigned_name(node: Node<'_>, source: &str) -> Option<String> {
-    let mut current = node;
-    loop {
-        let parent = current.parent()?;
-        if [
-            "await_expression",
-            "try_expression",
-            "parenthesized_expression",
-            "as_expression",
-            "satisfies_expression",
-            "non_null_expression",
-        ]
-        .contains(&parent.kind())
-        {
-            current = parent;
-            continue;
-        }
-        if [
-            "assignment",
-            "assignment_expression",
-            "variable_declarator",
-            "let_declaration",
-        ]
-        .contains(&parent.kind())
-        {
-            let rhs = child(parent, "right").or_else(|| child(parent, "value"))?;
-            if rhs.id() != current.id() {
-                return None;
-            }
-            let left = child(parent, "left")
-                .or_else(|| child(parent, "name"))
-                .or_else(|| child(parent, "pattern"))?;
-            let name = snippet(left, source)
-                .trim()
-                .trim_start_matches('$')
-                .trim_start_matches("mut ")
-                .to_string();
-            return if name.is_empty() { None } else { Some(name) };
-        }
-        return None;
-    }
-}
-fn collect_accessed_fields(
-    node: Node<'_>,
-    source: &str,
-    dialect: Dialect,
-    receivers: &[&str],
-    fields: &mut BTreeSet<String>,
-) {
-    let mut pending = vec![node];
-    while let Some(node) = pending.pop() {
-        let kind = node.kind();
-        let (object, field) = match (dialect, kind) {
-            (Dialect::Python, "attribute") => (child(node, "object"), child(node, "attribute")),
-            (Dialect::JavaScript | Dialect::TypeScript, "member_expression") => {
-                (child(node, "object"), child(node, "property"))
-            }
-            (Dialect::Php, "member_access_expression" | "nullsafe_member_access_expression") => {
-                (child(node, "object"), child(node, "name"))
-            }
-            (Dialect::Rust, "field_expression") => (child(node, "value"), child(node, "field")),
-            _ => (None, None),
-        };
-        if let (Some(object), Some(field)) = (object, field) {
-            let receiver = snippet(object, source).trim();
-            if receivers.contains(&receiver.trim_start_matches('$')) {
-                let name = snippet(field, source).trim();
-                if !name.is_empty() {
-                    fields.insert(name.into());
-                }
-            }
-        }
-        pending.extend(
-            named_children(node)
-                .into_iter()
-                .filter(|c| !is_function(c.kind(), dialect)),
-        );
-    }
-}
-
-/// Reserved receivers and actual implicit parameters are language-specific.
-fn receiver_names(f: &FunctionModel, dialect: Dialect) -> Vec<&str> {
-    if f.parent_type.is_none() || f.parent_function.is_some() {
-        return Vec::new();
-    }
-    let mut names = f
-        .parameters
-        .iter()
-        .filter(|p| {
-            p.implicit_receiver
-                && !(dialect == Dialect::TypeScript && p.name == "this" && p.type_name.is_some())
-        })
-        .map(|p| p.name.as_str())
-        .collect::<Vec<_>>();
-    match dialect {
-        Dialect::Php => {
-            if !f.modifiers.iter().any(|m| m == "static") {
-                names.push("this");
-            }
-        }
-        Dialect::JavaScript | Dialect::TypeScript => {
-            if !f
-                .parameters
-                .iter()
-                .any(|p| p.name == "this" && p.type_name.is_some())
-            {
-                names.push("this");
-            }
-        }
-        Dialect::Rust => names.push("Self"),
-        Dialect::Python => {}
-    }
-    names
-}
-
-/// Recognize direct field reads/writes; a method's name does not prove its behavior.
-fn classify_accessor(
-    body: Node<'_>,
-    f: &FunctionModel,
-    source: &str,
-    dialect: Dialect,
-) -> Option<AccessorKind> {
-    if f.modifiers.iter().any(|modifier| modifier == "accessor") {
-        if f.fqn.ends_with("#get") {
-            return Some(AccessorKind::Getter);
-        }
-        if f.fqn.ends_with("#set") {
-            return Some(AccessorKind::Setter);
-        }
-    }
-    if f.parent_type.is_none()
-        || f.parent_function.is_some()
-        || !f.calls.is_empty()
-        || f.complexity > 1
-    {
-        return None;
-    }
-    if matches!(dialect, Dialect::Python | Dialect::Rust)
-        && !f.parameters.iter().any(|p| p.implicit_receiver)
-    {
-        return None;
-    }
-    let params = f
-        .parameters
-        .iter()
-        .filter(|p| !p.implicit_receiver)
-        .collect::<Vec<_>>();
-    let receiver = f
-        .parameters
-        .iter()
-        .find(|p| p.implicit_receiver)
-        .map(|p| p.name.as_str())
-        .unwrap_or(match dialect {
-            Dialect::Php => "$this",
-            Dialect::JavaScript | Dialect::TypeScript => "this",
-            _ => "self",
-        });
-    let mut statements =
-        if ["block", "statement_block", "compound_statement"].contains(&body.kind()) {
-            named_children(body)
-        } else {
-            vec![body]
-        };
-    statements.retain(|n| !n.kind().contains("comment"));
-    // A Python docstring does not add behavior.
-    if dialect == Dialect::Python
-        && statements.first().is_some_and(|n| {
-            n.kind() == "expression_statement"
-                && named_children(*n)
-                    .first()
-                    .is_some_and(|c| c.kind() == "string")
-        })
-    {
-        statements.remove(0);
-    }
-    let first = *statements.first()?;
-    let value = if first.kind() == "return_statement" {
-        named_children(first).last().copied()
-    } else if dialect == Dialect::Rust && first.kind() != "expression_statement" {
-        // Only Rust returns a block's tail expression implicitly. A discarded field read
-        // (including a Rust expression with a semicolon) is not a getter.
-        Some(first)
-    } else {
-        None
-    };
-    if statements.len() == 1
-        && params.is_empty()
-        && value.is_some_and(|value| direct_receiver_field(value, receiver, source, dialect))
-    {
-        return Some(AccessorKind::Getter);
-    }
-    if params.len() != 1 || statements.len() > 2 {
-        return None;
-    }
-    let assignment = if first.kind() == "expression_statement" {
-        *named_children(first).first()?
-    } else {
-        first
-    };
-    if !["assignment", "assignment_expression"].contains(&assignment.kind()) {
-        return None;
-    }
-    let left = child(assignment, "left")?;
-    let right = child(assignment, "right")?;
-    // Reject augmented assignment, computed properties, conversion and validation logic.
-    let mut cursor = assignment.walk();
-    if !assignment.children(&mut cursor).any(|n| n.kind() == "=")
-        || !direct_receiver_field(left, receiver, source, dialect)
-    {
-        return None;
-    }
-    if !["identifier", "variable_name"].contains(&right.kind())
-        || snippet(right, source).trim().trim_start_matches('$')
-            != params[0].name.trim_start_matches('$')
-    {
-        return None;
-    }
-    if statements.len() == 2 {
-        let ret = statements[1];
-        if ret.kind() != "return_statement" {
-            return None;
-        }
-        let returned = *named_children(ret).last()?;
-        if snippet(returned, source).trim() != receiver {
-            return None;
-        }
-    }
-    Some(AccessorKind::Setter)
-}
-fn direct_receiver_field(
-    mut node: Node<'_>,
-    receiver: &str,
-    source: &str,
-    dialect: Dialect,
-) -> bool {
-    if node.kind() == "expression_statement" {
-        let children = named_children(node);
-        if children.len() != 1 {
-            return false;
-        }
-        node = children[0];
-    }
-    // Rust borrows of fields are accessor-shaped as well.
-    if dialect == Dialect::Rust && node.kind() == "reference_expression" {
-        let Some(value) = child(node, "value") else {
-            return false;
-        };
-        node = value;
-    }
-    let (object, field) = match (dialect, node.kind()) {
-        (Dialect::Python, "attribute") => (child(node, "object"), child(node, "attribute")),
-        (Dialect::JavaScript | Dialect::TypeScript, "member_expression") => {
-            (child(node, "object"), child(node, "property"))
-        }
-        (Dialect::Php, "member_access_expression") => (child(node, "object"), child(node, "name")),
-        (Dialect::Rust, "field_expression") => (child(node, "value"), child(node, "field")),
-        _ => return false,
-    };
-    object.is_some_and(|o| snippet(o, source).trim() == receiver)
-        && field.is_some_and(|n| {
-            [
-                "identifier",
-                "property_identifier",
-                "field_identifier",
-                "name",
-                "private_property_identifier",
-            ]
-            .contains(&n.kind())
-        })
 }
 
 #[cfg(test)]

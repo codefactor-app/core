@@ -2,6 +2,7 @@ use analyzer_core::{
     CallSite, Capabilities, ExternalOperationRule, FileModel, LanguageStrategy, Loc, RawAst,
     TypeContext,
 };
+use analyzer_parser::runtime::external_catalog as catalog;
 use analyzer_parser::{
     count_lines, normalize, parse, resolve_call as parser_resolve_call, Dialect,
 };
@@ -128,15 +129,4 @@ impl LanguageStrategy for Python {
             ("tcp", "socket.*.connect", "socket"),
         ])
     }
-}
-fn catalog(items: &[(&str, &str, &str)]) -> Vec<ExternalOperationRule> {
-    items
-        .iter()
-        .map(|(category, pattern, library)| ExternalOperationRule {
-            category: (*category).into(),
-            pattern: (*pattern).into(),
-            library: (*library).into(),
-            operation: pattern.rsplit('.').next().unwrap_or(pattern).into(),
-        })
-        .collect()
 }

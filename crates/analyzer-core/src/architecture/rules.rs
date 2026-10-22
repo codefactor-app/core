@@ -106,7 +106,7 @@ pub(super) fn cycles(
         let mut proof = path
             .windows(2)
             .filter_map(|p| by_pair.get(&(p[0].as_str(), p[1].as_str())))
-            .map(|d| dependency_evidence(d, &keys, false))
+            .map(|d| dependency_evidence(d, keys, false))
             .collect::<Vec<_>>();
         // The shortest cycle need not visit every member of the SCC. Retain one
         // actual outgoing dependency per remaining participant for related-source
@@ -117,7 +117,7 @@ pub(super) fn cycles(
             .collect::<BTreeSet<_>>();
         for d in &participant_edges[index] {
             if !covered.contains(d.from) {
-                proof.push(dependency_evidence(d, &keys, true));
+                proof.push(dependency_evidence(d, keys, true));
             }
         }
         let Some(first) = proof.first() else {
@@ -192,9 +192,11 @@ pub(super) fn dependency_evidence(
     keys: &ModuleAssignments,
     related: bool,
 ) -> Evidence {
-    Evidence {
-        range: d.range.clone(),
-        description: format!(
+    dependency_evidence_for_modules(
+        d,
+        keys[d.from].clone(),
+        keys[d.to].clone(),
+        format!(
             "{}{} → {} ({})",
             if related {
                 "Участник компоненты: "
@@ -205,9 +207,21 @@ pub(super) fn dependency_evidence(
             d.to,
             d.kind
         ),
+    )
+}
+
+fn dependency_evidence_for_modules(
+    d: &Dependency<'_>,
+    from_module: String,
+    to_module: String,
+    description: String,
+) -> Evidence {
+    Evidence {
+        range: d.range.clone(),
+        description,
         dependency: Some(DependencyEvidence {
-            from_module: keys[d.from].clone(),
-            to_module: keys[d.to].clone(),
+            from_module,
+            to_module,
             from_file: d.from.into(),
             to_file: d.to.into(),
             kind: d.kind.into(),
@@ -255,12 +269,11 @@ pub(super) fn boundaries(
         if config
             .composition_roots
             .iter()
-            .any(|s| matches(s, a, &d.source_entity))
+            .any(|s| matches(s, a, d.source_entity))
         {
             continue;
         }
-        let (Some(from), Some(to)) = (layer(a, &d.source_entity), layer(b, &d.target_entity))
-        else {
+        let (Some(from), Some(to)) = (layer(a, d.source_entity), layer(b, d.target_entity)) else {
             continue;
         };
         if config
@@ -282,8 +295,10 @@ pub(super) fn boundaries(
         let proof = ds
             .iter()
             .map(|d| {
-                evidence(
-                    &d.range,
+                dependency_evidence_for_modules(
+                    d,
+                    module_key(symbols.files[d.from]),
+                    module_key(symbols.files[d.to]),
                     format!("{} → {} ({})", d.source_entity, d.target_entity, d.kind),
                 )
             })
@@ -296,7 +311,7 @@ pub(super) fn boundaries(
         emit(
             out,
             "arch_boundary",
-            &first.range,
+            first.range,
             &format!("{from} → {to}"),
             format!(
                 "{} подтверждённых зависимостей нарушают заданный запрет {from} → {to}.",
@@ -624,22 +639,11 @@ pub(super) fn cohesion(
                 .into_iter()
                 .flatten()
                 .copied()
-                .filter(|(_, m, ff)| {
+                .filter(|(f, m, ff)| {
                     m.parent_function.is_none()
-                        && !m.modifiers.iter().any(|s| {
-                            matches!(
-                                s.as_str(),
-                                "static"
-                                    | "@staticmethod"
-                                    | "@builtins.staticmethod"
-                                    | "@classmethod"
-                                    | "@builtins.classmethod"
-                            ) || s.contains("abstract")
-                        })
-                        && !matches!(
-                            m.name.as_str(),
-                            "constructor" | "__init__" | "__construct" | "new"
-                        )
+                        && !m.is_static_method()
+                        && !m.is_abstract_method()
+                        && !m.is_constructor(&f.language)
                         && m.accessor.is_none()
                         && ff.body_present
                 })
@@ -1376,12 +1380,12 @@ pub(super) fn stability(
         emit(
             out,
             "arch_stability",
-            &d.range,
+            d.range,
             &a,
             format!("По наблюдаемому графу I({a})={ai:.3}, I({b})={bi:.3}; I=Ce/(Ca+Ce)."),
             "Возможно, более устойчивый модуль зависит от менее устойчивого.",
             vec![a.clone(), b],
-            vec![evidence(&d.range, format!("{} → {}", d.from, d.to))],
+            vec![evidence(d.range, format!("{} → {}", d.from, d.to))],
             BTreeMap::from([
                 ("source_instability".into(), ai),
                 ("target_instability".into(), bi),

@@ -235,6 +235,24 @@ fn overlapping_groups_fail_even_when_advisory_architecture_is_disabled() {
 }
 
 #[test]
+fn invalid_module_depth_fails_scan_even_when_advisory_architecture_is_disabled() {
+    let project = Project::new(&[("a.mini", "module App\\Billing")]);
+    for (language, depth) in [("php", 0), ("mini", 2)] {
+        let mut config = config();
+        config.architecture.enabled = false;
+        config
+            .architecture
+            .module_depth
+            .insert(language.into(), depth);
+        let error = analyzer(config).scan(&project.0).unwrap_err().to_string();
+        assert!(
+            error.contains("module_depth"),
+            "{language}={depth}: {error}"
+        );
+    }
+}
+
+#[test]
 fn thresholds_legacy_baseline_and_suppressions_apply_before_grouping() {
     let project = Project::new(&[
         ("a.mini", "module A\ncall b"),
@@ -248,6 +266,7 @@ fn thresholds_legacy_baseline_and_suppressions_apply_before_grouping() {
             Threshold {
                 warn: Some(0.0),
                 error: Some(2.0),
+                enabled: None,
             },
         )]),
     });
@@ -369,7 +388,7 @@ fn module_configuration_is_strictly_validated() {
 }
 
 #[test]
-fn lcom_is_inapplicable_to_interfaces_and_enums_in_every_language() {
+fn lcom_is_inapplicable_to_interfaces_enums_and_traits_in_every_language() {
     for language in ["php", "python", "javascript", "typescript", "rust"] {
         for kind in [
             TypeKind::Class,
@@ -378,7 +397,7 @@ fn lcom_is_inapplicable_to_interfaces_and_enums_in_every_language() {
             TypeKind::Interface,
             TypeKind::Enum,
         ] {
-            let applies = !matches!(kind, TypeKind::Interface | TypeKind::Enum);
+            let applies = !matches!(kind, TypeKind::Interface | TypeKind::Enum | TypeKind::Trait);
             let file = FileModel {
                 path: "type".into(),
                 language: language.into(),
@@ -393,6 +412,7 @@ fn lcom_is_inapplicable_to_interfaces_and_enums_in_every_language() {
                         name: name.into(),
                         fqn: format!("Shape::{name}"),
                         parent_type: Some("Shape".into()),
+                        accessed_fields: vec![name.into()],
                         ..Default::default()
                     })
                     .collect(),

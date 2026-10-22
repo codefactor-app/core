@@ -1,3 +1,4 @@
+use super::witnesses::*;
 use super::*;
 use crate::graph::{CallGraph, NodeKind};
 use crate::ir::*;
@@ -123,7 +124,7 @@ impl<'a> Symbols<'a> {
             .types
             .iter()
             .enumerate()
-            .filter(|(_, t)| super::in_range(range, &t.range))
+            .filter(|(_, t)| in_range(range, &t.range))
             .min_by_key(|(_, t)| t.range.end_line.saturating_sub(t.range.start_line));
         // Alias identity, enclosing declaration and file fully determine this resolver's context.
         // Rust relative paths have additional lexical rules and bypass this cache.
@@ -222,7 +223,7 @@ impl<'a> Symbols<'a> {
             return name.to_owned();
         };
         if let Some((f, t)) = self.resolve_type(file, name, range) {
-            return super::type_id(f, t);
+            return type_id(f, t);
         }
         let target = self
             .resolver
@@ -365,10 +366,7 @@ pub(super) fn dependencies<'a>(
             })
             .unwrap_or_default();
         for i in &file.imports {
-            if module_imports
-                .iter()
-                .any(|r| super::in_range(&i.range, &r.range))
-            {
+            if module_imports.iter().any(|r| in_range(&i.range, &r.range)) {
                 continue;
             }
             if let Some(target) = symbols.import_module(file, i) {
@@ -714,7 +712,7 @@ pub(super) fn dependencies<'a>(
 fn enclosing_entity<'a>(file: &'a FileModel, range: &SourceRange) -> &'a str {
     file.functions
         .iter()
-        .filter(|f| super::in_range(range, &f.range))
+        .filter(|f| in_range(range, &f.range))
         .min_by_key(|f| {
             (
                 f.range.end_line - f.range.start_line,
@@ -725,7 +723,7 @@ fn enclosing_entity<'a>(file: &'a FileModel, range: &SourceRange) -> &'a str {
         .or_else(|| {
             file.types
                 .iter()
-                .filter(|t| super::in_range(range, &t.range))
+                .filter(|t| in_range(range, &t.range))
                 .min_by_key(|t| t.range.end_line - t.range.start_line)
                 .map(|t| t.fqn.as_str())
         })
@@ -758,7 +756,8 @@ fn push<'a>(
     });
 }
 pub(super) fn is_abstract(f: &FileModel, t: &TypeModel) -> bool {
-    matches!(t.kind, TypeKind::Interface | TypeKind::Trait)
+    t.is_abstract
+        || matches!(t.kind, TypeKind::Interface | TypeKind::Trait)
         || f.architecture_facts
             .as_ref()
             .is_some_and(|a| a.abstract_types.contains(&t.fqn))

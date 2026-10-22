@@ -30,10 +30,25 @@ pub(super) fn assign_modules(
         }
         let key = if let Some(name) = matches.first() {
             format!("{}:group:{name}", file.language)
-        } else if config.modules.is_empty() {
+        } else if config.modules.is_empty() && !config.module_depth.contains_key(&file.language) {
             rules::module_key(file)
         } else {
-            format!("{}:native:{}", file.language, file.module)
+            let module = match config.module_depth.get(&file.language) {
+                Some(depth) => {
+                    let separator = module_separator(&file.language).unwrap();
+                    file.module
+                        .split(separator)
+                        .take(*depth)
+                        .collect::<Vec<_>>()
+                        .join(separator)
+                }
+                None => file.module.clone(),
+            };
+            if config.modules.is_empty() {
+                format!("{}:{module}", file.language)
+            } else {
+                format!("{}:native:{module}", file.language)
+            }
         };
         assignments.insert(file.path.clone(), key);
     }
@@ -164,6 +179,63 @@ mod tests {
             name: name.into(),
             selectors: selectors.iter().map(|s| (*s).into()).collect(),
         }
+    }
+
+    #[test]
+    fn native_module_depth_uses_each_languages_separator_and_keeps_short_names() {
+        for (language, separator) in [
+            ("php", "\\"),
+            ("python", "."),
+            ("rust", "::"),
+            ("javascript", "/"),
+            ("typescript", "/"),
+        ] {
+            for (module, expected) in [
+                (
+                    format!("App{separator}Billing{separator}Store"),
+                    format!("App{separator}Billing"),
+                ),
+                ("App".into(), "App".into()),
+                (String::new(), String::new()),
+            ] {
+                let file = FileModel {
+                    path: "source".into(),
+                    language: language.into(),
+                    module: module.clone(),
+                    ..Default::default()
+                };
+                let config = ArchitectureConfig {
+                    module_depth: BTreeMap::from([(language.into(), 2)]),
+                    ..Default::default()
+                };
+                let assignments = assign_modules(&[&file], &CallGraph::default(), &config).unwrap();
+                assert_eq!(assignments["source"], format!("{language}:{expected}"));
+                assert_eq!(file.module, module);
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_module_groups_win_over_depth_and_preserve_native_identity_prefixes() {
+        let files = ["selected.php", "native.php"].map(|path| FileModel {
+            path: path.into(),
+            language: "php".into(),
+            module: "App\\Billing\\Store".into(),
+            ..Default::default()
+        });
+        let config = ArchitectureConfig {
+            module_depth: BTreeMap::from([("php".into(), 2)]),
+            modules: vec![group("store", &["file:selected.php"])],
+            ..Default::default()
+        };
+        let assignments = assign_modules(
+            &files.iter().collect::<Vec<_>>(),
+            &CallGraph::default(),
+            &config,
+        )
+        .unwrap();
+        assert_eq!(assignments["selected.php"], "php:group:store");
+        assert_eq!(assignments["native.php"], "php:native:App\\Billing");
     }
     #[test]
     fn file_selectors_share_existing_semantics_and_package_ownership() {

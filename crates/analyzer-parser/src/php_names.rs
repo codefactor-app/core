@@ -1,5 +1,6 @@
 //! Source PHP class references become absolute before lexical type lookup.
-use super::*;
+use crate::support::import_applies;
+use analyzer_core::ir::*;
 
 pub(super) fn reference(
     raw: &str,
@@ -38,7 +39,7 @@ pub(super) fn reference(
     if !name.starts_with("namespace\\") {
         let mut matches = imports
             .iter()
-            .filter(|import| bindings::applies(import, range))
+            .filter(|import| import_applies(import, range))
             .filter_map(|import| {
                 let alias = import
                     .alias

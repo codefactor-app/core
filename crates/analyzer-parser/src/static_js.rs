@@ -1,5 +1,6 @@
 //! Bounded lexical string proofs. This never invokes JavaScript or user code.
-use super::*;
+use crate::support::*;
+use tree_sitter::Node;
 
 const MAX_DEPTH: usize = 16;
 const MAX_NODES: usize = 128;

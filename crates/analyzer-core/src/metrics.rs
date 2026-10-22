@@ -7,25 +7,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-pub fn basic_line_counts(source: &str) -> Loc {
-    let mut loc = Loc::default();
-    for line in source.lines() {
-        loc.total += 1;
-        let t = line.trim();
-        if t.is_empty() {
-            loc.blank += 1;
-        } else if t.starts_with("//")
-            || t.starts_with('#')
-            || t.starts_with("/*")
-            || t.starts_with('*')
-        {
-            loc.comment += 1;
-        } else {
-            loc.code += 1;
-        }
-    }
-    loc
-}
+pub use crate::source::basic_line_counts;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MetricValue {
@@ -58,31 +40,7 @@ pub trait Metric: Send + Sync {
     fn register_config(&self, _loader: &mut crate::config::ConfigLoader) {}
 }
 
-pub fn builtin_metric_ids() -> &'static [&'static str] {
-    &[
-        "file_lines",
-        "functions_per_file",
-        "types_per_file",
-        "methods_per_class",
-        "fields_per_class",
-        "function_lines",
-        "function_body_lines",
-        "function_params",
-        "cyclomatic_complexity",
-        "nesting_depth",
-        "return_points",
-        "comment_ratio",
-        "inheritance_depth",
-        "lcom4",
-        "fan_in",
-        "fan_out",
-        "halstead_volume",
-        "maintainability_index",
-        "cognitive_complexity",
-        "duplicate_functions",
-        "module_cycle",
-    ]
-}
+pub use crate::metric_ids::builtin_metric_ids;
 
 #[derive(Default)]
 pub struct MetricRegistry {
@@ -233,7 +191,11 @@ impl Metric for BuiltinMetric {
                 body,
             );
             add(
-                "function_params",
+                if f.is_constructor(&file.language) {
+                    "constructor_params"
+                } else {
+                    "function_params"
+                },
                 "function",
                 &f.fqn,
                 f.range.start_line,
@@ -593,8 +555,8 @@ fn advanced_metrics_with_text_facts(
         out.push(MetricValue {
             id: strings.intern("comment_ratio"),
             scope: strings.intern("file"),
-            entity: strings.intern(&path),
-            path: strings.intern(&path),
+            entity: strings.intern(path),
+            path: strings.intern(path),
             line: 1,
             value: ratio,
         });
@@ -617,18 +579,22 @@ fn advanced_metrics_with_text_facts(
                 id: strings.intern("inheritance_depth"),
                 scope: strings.intern("class"),
                 entity: strings.intern(&t.fqn),
-                path: strings.intern(&path),
+                path: strings.intern(path),
                 line: t.range.start_line,
                 value: depth as f64,
             });
-            if matches!(t.kind, TypeKind::Interface | TypeKind::Enum) {
-                continue;
-            }
             let methods = methods_by_type
                 .get(t.fqn.as_str())
                 .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let lcom = lcom4(methods, |method| {
+                .unwrap_or(&[])
+                .iter()
+                .copied()
+                .filter(|method| !method.is_static_method() && !method.is_abstract_method())
+                .collect::<Vec<_>>();
+            if !lcom4_applicable(t, &methods) {
+                continue;
+            }
+            let lcom = lcom4(&methods, |method| {
                 let id = format!("fn:{}:{}:{}", file.language, file.path, method.fqn);
                 method_nodes
                     .get(id.as_str())
@@ -653,11 +619,21 @@ fn advanced_metrics_with_text_facts(
                     .map(|node| node.source_fqn.as_deref().unwrap_or(&node.label))
                     .collect()
             });
+            // Without field access, only a call connecting distinct suitable
+            // methods establishes cohesion. Reuse the computed components so
+            // recursive self-calls do not make a discrete graph applicable.
+            if lcom == methods.len()
+                && methods
+                    .iter()
+                    .all(|method| method.accessed_fields.is_empty())
+            {
+                continue;
+            }
             out.push(MetricValue {
                 id: strings.intern("lcom4"),
                 scope: strings.intern("class"),
                 entity: strings.intern(&t.fqn),
-                path: strings.intern(&path),
+                path: strings.intern(path),
                 line: t.range.start_line,
                 value: lcom as f64,
             });
@@ -693,7 +669,7 @@ fn advanced_metrics_with_text_facts(
                     id: strings.intern(name),
                     scope: strings.intern("function"),
                     entity: strings.intern(&f.fqn),
-                    path: strings.intern(&path),
+                    path: strings.intern(path),
                     line: f.range.start_line,
                     value,
                 });
@@ -711,8 +687,8 @@ fn advanced_metrics_with_text_facts(
             out.push(MetricValue {
                 id: strings.intern("duplicate_functions"),
                 scope: strings.intern("function"),
-                entity: strings.intern(&entity),
-                path: strings.intern(&path),
+                entity: strings.intern(entity),
+                path: strings.intern(path),
                 line: *line,
                 value: (group.len() - 1) as f64,
             });
@@ -1007,6 +983,15 @@ fn halstead_volume(tokens: &[&str]) -> f64 {
     let unique = tokens.iter().copied().collect::<HashSet<_>>().len();
     tokens.len() as f64 * (unique.max(1) as f64).log2()
 }
+fn lcom4_applicable(typ: &TypeModel, methods: &[&FunctionModel]) -> bool {
+    !typ.is_abstract
+        && !matches!(
+            typ.kind,
+            TypeKind::Interface | TypeKind::Enum | TypeKind::Trait
+        )
+        && methods.len() >= 2
+}
+
 fn lcom4<'a>(
     methods: &[&'a FunctionModel],
     mut targets: impl FnMut(&'a FunctionModel) -> Vec<&'a str>,
@@ -1083,6 +1068,112 @@ fn lcom4_from_declared_targets(methods: &[&FunctionModel]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constructor_parameters_have_their_own_metric_for_each_language() {
+        for language in ["php", "python", "javascript", "typescript", "rust"] {
+            let name = crate::ir::constructor_name_for(language).unwrap();
+            let constructor = FunctionModel {
+                name: name.into(),
+                fqn: format!("C::{name}"),
+                parent_type: Some("C".into()),
+                parameters: vec![
+                    crate::ir::Parameter {
+                        name: "self".into(),
+                        implicit_receiver: true,
+                        ..Default::default()
+                    },
+                    crate::ir::Parameter {
+                        name: "value".into(),
+                        ..Default::default()
+                    },
+                    crate::ir::Parameter {
+                        name: "args".into(),
+                        variadic: true,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            };
+            let mut free = constructor.clone();
+            free.parent_type = None;
+            free.fqn = name.into();
+            let mut nested = constructor.clone();
+            nested.parent_function = Some("C::outer".into());
+            nested.fqn = format!("C::outer::{name}");
+            let file = FileModel {
+                path: "source".into(),
+                language: language.into(),
+                functions: vec![constructor, free, nested],
+                ..Default::default()
+            };
+            for count_receiver in [false, true] {
+                for count_variadic in [false, true] {
+                    let mut config = Config::default();
+                    config.metrics.count_implicit_receiver = count_receiver;
+                    config.metrics.count_variadic_parameters = count_variadic;
+                    let metrics = MetricRegistry::new().calculate(&file, &config);
+                    let params = metrics
+                        .iter()
+                        .filter(|m| {
+                            matches!(m.id.as_ref(), "function_params" | "constructor_params")
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(params.len(), 3, "{language}");
+                    for (index, metric) in params.iter().enumerate() {
+                        assert_eq!(
+                            metric.id.as_ref(),
+                            if index == 0 {
+                                "constructor_params"
+                            } else {
+                                "function_params"
+                            },
+                            "{language}"
+                        );
+                        assert_eq!(
+                            metric.value,
+                            1.0 + f64::from(count_receiver) + f64::from(count_variadic)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn constructor_detection_is_scoped_to_the_language_and_php_case_rules() {
+        for (language, name, expected) in [
+            ("php", "__CONSTRUCT", true),
+            ("php", "constructor", false),
+            ("python", "__INIT__", false),
+            ("python", "new", false),
+            ("javascript", "constructor", true),
+            ("typescript", "Constructor", false),
+            ("rust", "new", true),
+            ("unknown", "new", false),
+        ] {
+            let function = FunctionModel {
+                name: name.into(),
+                parent_type: Some("C".into()),
+                ..Default::default()
+            };
+            assert_eq!(
+                function.is_constructor(language),
+                expected,
+                "{language}: {name}"
+            );
+        }
+        for language in ["javascript", "typescript"] {
+            let function = FunctionModel {
+                name: "constructor".into(),
+                parent_type: Some("C".into()),
+                modifiers: vec!["static".into()],
+                ..Default::default()
+            };
+            assert!(!function.is_constructor(language), "{language}");
+        }
+    }
+
     #[test]
     fn prepared_text_facts_preserve_duplicates_ranges_and_file_order() {
         use sha2::{Digest, Sha256};
@@ -1242,78 +1333,6 @@ mod tests {
         );
     }
     #[test]
-    fn metric_pool_shares_rows_without_changing_json_aggregates_or_rules() {
-        let mut file = FileModel {
-            path: "long/module/source.ts".into(),
-            language: "typescript".into(),
-            module: "long.module.source".into(),
-            ..Default::default()
-        };
-        for index in 0..100 {
-            file.functions.push(FunctionModel {
-                fqn: format!("long.module.source.function_{index}"),
-                range: SourceRange {
-                    file: file.path.clone().into(),
-                    start_line: 1,
-                    end_line: 5,
-                    ..Default::default()
-                },
-                ..Default::default()
-            });
-        }
-        let mut config = Config::default();
-        config.limits.global.insert(
-            "function_lines".into(),
-            crate::config::Threshold {
-                warn: Some(3.0),
-                error: Some(8.0),
-            },
-        );
-        let registry = MetricRegistry::new();
-        let values = registry.calculate(&file, &config);
-        assert!(values
-            .iter()
-            .all(|value| Arc::ptr_eq(&value.path, &values[0].path)));
-        let function_values = values
-            .iter()
-            .filter(|value| value.entity.as_ref() == "long.module.source.function_0")
-            .collect::<Vec<_>>();
-        assert_eq!(function_values.len(), 6);
-        assert!(function_values
-            .iter()
-            .all(|value| Arc::ptr_eq(&value.entity, &function_values[0].entity)));
-        let serialized = serde_json::to_string(&values).unwrap();
-        let mut decoded: Vec<MetricValue> = serde_json::from_str(&serialized).unwrap();
-        registry.intern_values(&mut decoded);
-        assert_eq!(serde_json::to_string(&decoded).unwrap(), serialized);
-        assert!(decoded
-            .iter()
-            .all(|value| Arc::ptr_eq(&value.path, &decoded[0].path)));
-        let files = [file];
-        let aggregated = aggregates(&files, &decoded, 10);
-        let project = aggregated
-            .iter()
-            .find(|group| group.name == "project")
-            .unwrap();
-        assert_eq!(project.metrics["function_lines"].median, 5.0);
-        let violations = crate::rules::evaluate(
-            &decoded,
-            &files,
-            &aggregated,
-            &config,
-            &Default::default(),
-            &Default::default(),
-        );
-        assert_eq!(
-            violations
-                .iter()
-                .filter(|value| value.rule == "function_lines")
-                .count(),
-            100
-        );
-    }
-
-    #[test]
     fn lcom4_uses_field_access_and_method_calls() {
         let a = FunctionModel {
             name: "a".into(),
@@ -1340,6 +1359,51 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(lcom4_from_declared_targets(&[&a, &b, &c]), 1);
+    }
+
+    #[test]
+    fn lcom4_excludes_static_abstract_and_nested_methods_before_counting_components() {
+        let mut file = FileModel {
+            path: "class.php".into(),
+            language: "php".into(),
+            types: vec![TypeModel {
+                fqn: "Class".into(),
+                kind: TypeKind::Class,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        for (name, fields, modifiers, parent_function) in [
+            ("left", vec!["a"], vec![], None),
+            ("right", vec!["b"], vec![], None),
+            ("static_bridge", vec!["a", "b"], vec!["static"], None),
+            ("abstract_bridge", vec!["a", "b"], vec!["abstract"], None),
+            ("nested_bridge", vec!["a", "b"], vec![], Some("Class::left")),
+        ] {
+            file.functions.push(FunctionModel {
+                name: name.into(),
+                fqn: format!("Class::{name}"),
+                parent_type: Some("Class".into()),
+                parent_function: parent_function.map(str::to_owned),
+                accessed_fields: fields.into_iter().map(str::to_owned).collect(),
+                modifiers: modifiers.into_iter().map(str::to_owned).collect(),
+                ..Default::default()
+            });
+        }
+        let value = |file: &FileModel| {
+            advanced_metrics(
+                std::slice::from_ref(file),
+                &CallGraph::default(),
+                &BTreeMap::new(),
+                &Default::default(),
+            )
+            .into_iter()
+            .find(|metric| metric.id.as_ref() == "lcom4")
+            .map(|metric| metric.value)
+        };
+        assert_eq!(value(&file), Some(2.0));
+        file.functions.remove(1);
+        assert_eq!(value(&file), None, "only one suitable method remains");
     }
 
     #[test]
@@ -1443,6 +1507,19 @@ mod tests {
                     "{language}, reverse={reverse}"
                 );
             }
+            graph.edges = vec![edge("c", "c", Confidence::Resolved)];
+            graph.reindex();
+            assert!(
+                !advanced_metrics(
+                    std::slice::from_ref(&file),
+                    &graph,
+                    &BTreeMap::new(),
+                    &Default::default()
+                )
+                .iter()
+                .any(|metric| metric.id.as_ref() == "lcom4"),
+                "{language}: self-recursion leaves the fieldless method graph discrete"
+            );
         }
     }
     #[test]

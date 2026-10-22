@@ -137,28 +137,6 @@ impl LanguageStrategy for TypeScript {
         }
     }
     fn external_operations(&self) -> Vec<ExternalOperationRule> {
-        catalog(&[
-            ("db", "pg.*.query", "pg"),
-            ("db", "mysql2.*.execute", "mysql2"),
-            ("db", "*@prisma/client.PrismaClient.*", "Prisma"),
-            ("queue", "amqplib.*.publish", "amqplib"),
-            ("shell", "child_process.execFile", "child_process"),
-            ("shell", "child_process.exec", "child_process"),
-            ("http", "fetch", "fetch"),
-            ("http", "axios.get", "axios"),
-            ("http", "http.request", "http"),
-            ("tcp", "net.connect", "net"),
-        ])
+        analyzer_parser::runtime::javascript_external_operations()
     }
-}
-fn catalog(items: &[(&str, &str, &str)]) -> Vec<ExternalOperationRule> {
-    items
-        .iter()
-        .map(|(category, pattern, library)| ExternalOperationRule {
-            category: (*category).into(),
-            pattern: (*pattern).into(),
-            library: (*library).into(),
-            operation: pattern.rsplit('.').next().unwrap_or(pattern).into(),
-        })
-        .collect()
 }

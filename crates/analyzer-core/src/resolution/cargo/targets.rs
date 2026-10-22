@@ -1,23 +1,5 @@
 //! Cargo target identity is distinct from its physical source root.
 use super::*;
-#[derive(Clone, Debug)]
-pub(in crate::resolution) struct Target {
-    pub root: String,
-    pub package: String,
-    pub kind: String,
-    pub name: String,
-    pub requirements: Option<Vec<String>>,
-}
-impl Target {
-    pub(in crate::resolution) fn enabled(&self, config: &RustResolutionConfig) -> Option<bool> {
-        let required = self.requirements.as_ref()?;
-        if required.is_empty() {
-            return Some(true);
-        }
-        let features = config.features.as_ref()?;
-        Some(required.iter().all(|feature| features.contains(feature)))
-    }
-}
 #[derive(Default)]
 pub(super) struct Builder(BTreeMap<(String, String, String), Target>);
 impl Builder {

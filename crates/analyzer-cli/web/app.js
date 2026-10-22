@@ -144,12 +144,11 @@
     }catch(error){if(current())toast(error.message);}
     finally{if(state.branchBusy.get(id)===token)state.branchBusy.delete(id);if(current())renderGraph();}
   }
-  async function loadGraph() {
-    if(!graphModal.open||!state.symbol)return;
-    const request=++state.graphRequest,id=state.symbol.id;$('#graph').innerHTML='<div class="empty">Строим связи выбранной функции…</div>';
-    try {
-      let data;
-      if(state.imported) {
+  function importGraphDirection(reverse,starts,byId,map,included,edges) {
+          const seen=new Set(starts),queue=starts.map(member=>[member,0]);let at=0;
+          while(at<queue.length){const [current,depth]=queue[at++];if(state.depth&&depth>=Number(state.depth))continue;for(const edge of map.get(current)||[]){const next=reverse?edge.from:edge.to;const n=byId.get(next);if(!state.external&&n?.kind==='external')continue;if(state.category&&n?.kind==='external'&&n.category!==state.category)continue;edges.add(edge);included.add(next);if(!seen.has(next)){seen.add(next);queue.push([next,depth+1]);}}}
+  }
+  function importedGraphData(id) {
         // Imported graph navigation uses the same directed traversal as server queries.
         let source=state.imported;
         if(id.startsWith('type:')&&!source.nodes.some(n=>n.id===id)) {
@@ -163,10 +162,17 @@
         const included=new Set([id,...starts]), edges=new Set();
         if(classMembers){const memberEdge=(from,to)=>({from,to,confidence:'resolved',relation:'member'});if(state.direction!=='callers')classMembers.forEach(member=>edges.add(memberEdge(id,member)));if(state.direction!=='callees')classMembers.forEach(member=>edges.add(memberEdge(member,id)));}
         for(const reverse of state.direction==='both'?[true,false]:[state.direction==='callers']){
-          const seen=new Set(starts),queue=starts.map(member=>[member,0]),map=reverse?incoming:outgoing;let at=0;
-          while(at<queue.length){const [current,depth]=queue[at++];if(state.depth&&depth>=Number(state.depth))continue;for(const edge of map.get(current)||[]){const next=reverse?edge.from:edge.to;const n=byId.get(next);if(!state.external&&n?.kind==='external')continue;if(state.category&&n?.kind==='external'&&n.category!==state.category)continue;edges.add(edge);included.add(next);if(!seen.has(next)){seen.add(next);queue.push([next,depth+1]);}}}
+          importGraphDirection(reverse,starts,byId,reverse?incoming:outgoing,included,edges);
         }
-        data={nodes:source.nodes.filter(n=>included.has(n.id)),edges:[...edges],root:id,roots:starts,coverage:source.coverage,loaded_coverage:source.loaded_coverage,requested_coverage:source.requested_coverage,coverage_scope:source.coverage_scope,coverage_complete:source.coverage_complete,coverage_unparsed_vendor_files:source.coverage_unparsed_vendor_files,coverage_unparsed_vendor_packages:source.coverage_unparsed_vendor_packages,coverage_direction:source.coverage_direction,coverage_depth:source.coverage_depth,coverage_revision:source.coverage_revision,coverage_filters:source.coverage_filters,coverage_vendor_view:source.coverage_vendor_view,vendor_view:source.vendor_view,revision:source.revision,partial:source.partial,lazy:source.lazy,requested_depth:source.requested_depth,loaded_depth:source.loaded_depth,imported_snapshot:true};
+        return {nodes:source.nodes.filter(n=>included.has(n.id)),edges:[...edges],root:id,roots:starts,coverage:source.coverage,loaded_coverage:source.loaded_coverage,requested_coverage:source.requested_coverage,coverage_scope:source.coverage_scope,coverage_complete:source.coverage_complete,coverage_unparsed_vendor_files:source.coverage_unparsed_vendor_files,coverage_unparsed_vendor_packages:source.coverage_unparsed_vendor_packages,coverage_direction:source.coverage_direction,coverage_depth:source.coverage_depth,coverage_revision:source.coverage_revision,coverage_filters:source.coverage_filters,coverage_vendor_view:source.coverage_vendor_view,vendor_view:source.vendor_view,revision:source.revision,partial:source.partial,lazy:source.lazy,requested_depth:source.requested_depth,loaded_depth:source.loaded_depth,imported_snapshot:true};
+  }
+  async function loadGraph() {
+    if(!graphModal.open||!state.symbol)return;
+    const request=++state.graphRequest,id=state.symbol.id;$('#graph').innerHTML='<div class="empty">Строим связи выбранной функции…</div>';
+    try {
+      let data;
+      if(state.imported) {
+        data=importedGraphData(id);
       } else {
         const p=graphParams(state.direction,1);
         if(state.depth)p.set('coverage_depth',state.depth);else p.set('coverage_unbounded','true');
@@ -266,37 +272,61 @@
     $('#graph-inspector-body').innerHTML=`<h3>Скрытые рёбра зависимостей: ${num(item.edges.length)}</h3><p>${[...item.packages].map(esc).join(', ')||'Пакеты зависимостей'}</p><button id="show-hidden-vendor">Временно показать зависимости</button>${item.edges.slice(0,100).map(edge=>`<section class="call-detail"><p>${esc(edge.from)} → ${esc(edge.to)}</p>${edge.callsite?.file?`<button data-graph-source-file="${esc(edge.callsite.file)}" data-jump-line="${edge.callsite.start_line||1}">${esc(edge.callsite.file)}:${edge.callsite.start_line||1}</button>`:''}<pre>${esc(edgeGuard(edge))}</pre></section>`).join('')}${item.edges.length>100?'<p>Показаны первые 100 мест вызова.</p>':''}`;
     $('#graph-inspector').classList.remove('hidden');
   }
-  function renderGraph(center=false) {
-    const host=$('#graph'),data=state.graph;if(!data)return;
-    if(!data.nodes?.length){host.innerHTML='<div class="empty">Функция не найдена в графе.</div>';return;}
-    if($('#graph-view-mode').value==='tree'){renderChainTree();return;}host.classList.remove('chain-mode');
-    const layout=layoutGraph(data),{root,nodes,bundles,positions,frames}=layout,width=host.clientWidth||1000,height=host.clientHeight||500;state.graphLayout=layout;
-    if(center){const p=positions.get(root)||{x:0,y:0};state.pan=[width/2-(p.x+160)*state.scale,height/2-(p.y+nodeHeight(root)/2)*state.scale];}
-    const framesSvg=frames.map(frame=>{const b=CodefactorGraph.frameBounds(frame,positions);return `<g class="class-frame" data-class-frame="${esc(frame.id)}"><rect class="class-frame-box" x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" rx="14"/><g class="class-frame-heading" transform="translate(${b.x+14},${b.y+24})"><text data-class-info="${esc(frame.id)}" tabindex="0" role="button">${(frame.headerLines||[frame.label]).map((line,i)=>`<tspan x="0" y="${i*14}">${esc(line)}</tspan>`).join('')}</text>${svgAction(Math.min(b.width-55,335),-17,28,'↗',frame.owner?`data-class-go="${esc(frame.owner)}" data-class-language="${esc(frame.language||'')}"`:`data-graph-source-file="${esc(frame.file)}" data-jump-line="1"`,frame.owner?'Открыть граф методов класса '+frame.owner:'Открыть файл '+frame.file)}</g></g>`;}).join('');
-    const edgeSvg=bundles.map((bundle,index)=>{
+  function renderGraphFrame(frame,positions) {
+    const b=CodefactorGraph.frameBounds(frame,positions);return `<g class="class-frame" data-class-frame="${esc(frame.id)}"><rect class="class-frame-box" x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" rx="14"/><g class="class-frame-heading" transform="translate(${b.x+14},${b.y+24})"><text data-class-info="${esc(frame.id)}" tabindex="0" role="button">${(frame.headerLines||[frame.label]).map((line,i)=>`<tspan x="0" y="${i*14}">${esc(line)}</tspan>`).join('')}</text>${svgAction(Math.min(b.width-55,335),-17,28,'↗',frame.owner?`data-class-go="${esc(frame.owner)}" data-class-language="${esc(frame.language||'')}"`:`data-graph-source-file="${esc(frame.file)}" data-jump-line="1"`,frame.owner?'Открыть граф методов класса '+frame.owner:'Открыть файл '+frame.file)}</g></g>`;
+  }
+  function renderGraphEdge(bundle,index,positions) {
+
       const confidences=new Set(bundle.calls.map(e=>e.confidence||'dynamic')),confidence=confidences.has('dynamic')?'dynamic':confidences.has('ambiguous')?'ambiguous':'resolved',conditional=bundle.calls.some(hasEdgeCondition),caption=edgeCaption(bundle),point=edgePoint(bundle,positions),chipWidth=Math.max(110,caption.length*6+16);
       return `<g class="graph-edge ${confidence} ${conditional?'conditional-edge':'passive-edge'}" data-edge-index="${index}" ${conditional?`tabindex="0" role="button" aria-label="Показать условия связи: ${esc(caption)}"`:''}><path d="${edgePath(bundle,positions)}" marker-end="url(#arrow)"/>${conditional?`<path class="edge-hit" d="${edgePath(bundle,positions)}"/><g class="edge-chip" transform="translate(${point.x},${point.y})"><rect x="${-chipWidth/2}" y="-15" width="${chipWidth}" height="22" rx="6"/><text text-anchor="middle">${esc(caption)}</text></g>`:''}</g>`;
-    }).join('');
-    const nodeSvg=nodes.map(node=>{
-      const p=positions.get(String(node.id)),label=String(node.behavior==='module_initializer'?'Инициализация модуля':node.label||node.id),card=CodefactorGraph.nodeCard(node),offset=card.offset,cls=node.kind==='fold'?'fold':node.id===root?'root':node.vendor?'vendor':node.kind||'',m=node.metrics||{};
-      const boundary=node.unresolved?.reason==='type_not_analyzed',self=node.id!==root&&node.parent_type&&node.parent_type===(state.symbol.parent_type||(state.symbol.kind==='class'?state.symbol.label:null))&&(!state.symbol.language||node.language===state.symbol.language);
-      const owner=node.behavior==='module_initializer'?'Модуль: '+shortPath(node.file||'',34):node.kind==='fold'&&['callers','callees'].includes(node.category)?'Прямые связи выбранного метода':node.kind==='class'?'Класс · методов '+num(node.member_count):node.parent_type?'Класс: '+node.parent_type:node.kind==='unknown'?'Тип получателя не установлен':node.kind==='external'?(node.category==='runtime'?'Стандартная функция языка':'Внешняя операция · '+(node.category||'')):node.kind==='vendor_package'?'Пакет зависимости':'Свободная функция';
-      const hidden=node.kind==='fold'?{nodes:0,branches:0}:state.graphView.hidden(String(node.id)),remote=node.kind!=='fold'&&state.lazyGraph?.remote(state.graphView,String(node.id)),busy=state.branchBusy.has(String(node.id));
-      const behavior=({getter:'Геттер по структуре',setter:'Сеттер по структуре',simple_leaf:'Короткая · без вызовов',module_initializer:'Инициализация модуля'})[node.behavior]||'';
-      const header=(card.className?`<text class="node-field-label" x="14" y="20">КЛАСС</text>${svgTextLines('node-owner node-class',card.classLines,36,14)}`:'')+(card.functionLines.length?`<text class="node-field-label" x="14" y="${card.nameY-18}">${node.kind==='fold'?'ГРУППА':'ФУНКЦИЯ'}</text>${svgTextLines('node-name',card.functionLines,card.nameY,18)}`:'')+(!card.className?`<text class="node-owner" x="14" y="${63+offset}">${esc(owner)}</text>`:'');
+
+  }
+  function graphNodeOwner(node) {
+    if(node.behavior==='module_initializer')return 'Модуль: '+shortPath(node.file||'',34);
+    if(node.kind==='fold'&&['callers','callees'].includes(node.category))return 'Прямые связи выбранного метода';
+    if(node.kind==='class')return 'Класс · методов '+num(node.member_count);
+    if(node.parent_type)return 'Класс: '+node.parent_type;
+    if(node.kind==='unknown')return 'Тип получателя не установлен';
+    if(node.kind==='external')return node.category==='runtime'?'Стандартная функция языка':'Внешняя операция · '+(node.category||'');
+    if(node.kind==='vendor_package')return 'Пакет зависимости';
+    return 'Свободная функция';
+  }
+  function graphNodeActions(node,root,label,offset,hidden,remote,busy) {
       let actions='';const hiddenVendor=state.hiddenVendor?.get(String(node.id));if(hiddenVendor)actions+=svgAction(14,124+offset,176,'Vendor: '+num(hiddenVendor.edges.length)+' скрытых рёбер',`data-vendor-boundary="${esc(node.id)}"`,'Показать пакеты и места скрытых вызовов');
       if(node.kind==='fold'&&['callers','callees'].includes(node.category))actions=svgAction(191,135+offset,61,'+20',`data-neighbors-expand="${esc(node.id)}"`,'Показать следующие 20 методов')+svgAction(258,135+offset,49,'Всё',`data-neighbors-all="${esc(node.id)}"`,'Показать все методы направления');
       else if(node.kind==='fold')actions=svgAction(193,135+offset,114,'Показать '+num(node.members.length),`data-group-expand="${esc(node.id)}"`,'Раскрыть функции группы');
       else if(hidden.nodes||remote)actions+=svgAction(206,135+offset,43,busy?'…':'+1',`data-branch-expand="${esc(node.id)}"`,'Раскрыть следующий уровень')+svgAction(255,135+offset,52,busy?'…':'⇉ всё',`data-branch-all="${esc(node.id)}"`,'Раскрыть всю дальнейшую ветку');
       if(node.kind!=='fold'&&state.graphView.expanded(String(node.id)))actions+=svgAction(125,135+offset,73,'Свернуть',`data-branch-close="${esc(node.id)}"`,'Свернуть раскрытую ветку');
       if(node.kind!=='fold'&&node.kind!=='unknown'&&node.id!==root)actions+=svgAction(284,9,25,'↗',`data-graph-go="${esc(node.id)}"`,'Открыть граф '+label);
-      return `<g class="graph-node ${esc(cls)}${boundary?' boundary':''}${self?' self-method':''}${state.inspectedNode===node.id?' inspected':''}" data-graph-node="${esc(node.id)}" transform="translate(${p.x},${p.y})" tabindex="0" role="button" aria-label="Сведения о ${esc(label)}"><title>${esc(label)}\n${esc(owner)}\nПеретаскивание — перемещение, ↗ — переход</title><rect class="node-box" width="320" height="${card.height}" rx="10"/>${header}<text class="node-stats" x="14" y="${82+offset}">${node.kind==='fold'?`${num(node.members.length)} функций скрыто · ${node.category==='accessors'?'чтение / запись поля':node.category==='callers'?'вызывают выбранный метод':node.category==='callees'?'вызываются из выбранного метода':'до порога длины без вызовов'}`:node.behavior==='module_initializer'?`${num(m.callsites)} мест вызова · ← ${num(m.fan_in)} · → ${num(m.fan_out)}`:node.metrics?`P ${num(m.parameters)} · CYC ${num(m.complexity)} · ← ${num(m.fan_in)} · → ${num(m.fan_out)}${m.errors?' · ! '+num(m.errors):''}`:node.kind==='unknown'?(boundary?'Имя метода известно · код вне каталога':node.parent_type?'Класс известен · реализация не найдена':'Тип получателя не установлен'):node.kind==='class'?'Прямые связи методов класса':'См. сведения об операции'}</text><text class="node-subtitle" x="14" y="${100+offset}">${esc(shortPath(node.file||node.category||'',43))}${node.line?':'+node.line:''}</text>${algorithmicLabel(node)?`<text class="node-cost" x="14" y="${119+offset}">${esc(short((node.algorithmic_complexity?.status==='heuristic'?'Предположение: ':node.algorithmic_complexity?.status==='upper_bound'?'Граница: ':'')+algorithmicLabel(node),43))}</text>`:''}<text class="node-hidden" x="14" y="${151+offset}">${esc(remote?'Есть незагруженное продолжение':hidden.nodes?`Далее ${num(hidden.nodes)}${state.graphView.expanded(String(node.id))?'':' · ветвей '+num(hidden.branches)}`:node.kind==='fold'?node.label:behavior||(boundary?'Продолжение вне каталога':'Продолжения нет'))}</text>${actions}</g>`;
-    }).join('');
-    host.innerHTML=`<svg class="graph-canvas" viewBox="0 0 ${width} ${height}" aria-label="Граф функции ${esc(state.symbol.label)}"><defs><marker id="arrow" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><path d="M0,0 L9,3.5 L0,7 Z" fill="#8a9dbd"/></marker></defs><g class="graph-world">${framesSvg}${edgeSvg}${nodeSvg}</g></svg>${layout.remaining?`<div class="graph-limit">Ещё ${num(layout.remaining)} раскрытых элементов.<button id="graph-more">Показать ещё 600</button></div>`:''}`;
-    $('#coverage').textContent=`На холсте ${num(nodes.length)} элементов · раскрыто ${num(layout.revealed)} из ${num(data.nodes.length)} узлов${renderCoverage()}${state.imported?' · импорт':''}`;
-    $('#neighbor-controls').innerHTML=[...state.graphView.neighborGroups].filter(([key])=>(state.graphView.neighborShown.get(key)||0)>0).map(([key,g])=>`<button data-neighbors-close="${esc(key)}">Свернуть ${g.sign<0?'вызывающие':'вызываемые'} методы</button>`).join('');
-    applyTransform();$('#edge-tooltip').classList.add('hidden');
-    const svg=$('svg',host);let drag=null;
+      return actions;
+  }
+  function graphNodeStats(node,boundary) {
+    const m=node.metrics||{};
+    if(node.kind==='fold')return `${num(node.members.length)} функций скрыто · ${node.category==='accessors'?'чтение / запись поля':node.category==='callers'?'вызывают выбранный метод':node.category==='callees'?'вызываются из выбранного метода':'до порога длины без вызовов'}`;
+    if(node.behavior==='module_initializer')return `${num(m.callsites)} мест вызова · ← ${num(m.fan_in)} · → ${num(m.fan_out)}`;
+    if(node.metrics)return `P ${num(m.parameters)} · CYC ${num(m.complexity)} · ← ${num(m.fan_in)} · → ${num(m.fan_out)}${m.errors?' · ! '+num(m.errors):''}`;
+    if(node.kind==='unknown')return boundary?'Имя метода известно · код вне каталога':node.parent_type?'Класс известен · реализация не найдена':'Тип получателя не установлен';
+    if(node.kind==='class')return 'Прямые связи методов класса';
+    return 'См. сведения об операции';
+  }
+  function graphNodeContinuation(node,boundary,remote,hidden,behavior) {return remote?'Есть незагруженное продолжение':hidden.nodes?`Далее ${num(hidden.nodes)}${state.graphView.expanded(String(node.id))?'':' · ветвей '+num(hidden.branches)}`:node.kind==='fold'?node.label:behavior||(boundary?'Продолжение вне каталога':'Продолжения нет');}
+  function graphNodeHeading(node,card,offset,owner) {return (card.className?`<text class="node-field-label" x="14" y="20">КЛАСС</text>${svgTextLines('node-owner node-class',card.classLines,36,14)}`:'')+(card.functionLines.length?`<text class="node-field-label" x="14" y="${card.nameY-18}">${node.kind==='fold'?'ГРУППА':'ФУНКЦИЯ'}</text>${svgTextLines('node-name',card.functionLines,card.nameY,18)}`:'')+(!card.className?`<text class="node-owner" x="14" y="${63+offset}">${esc(owner)}</text>`:'');}
+  function graphNodeCost(node,offset) {return algorithmicLabel(node)?`<text class="node-cost" x="14" y="${119+offset}">${esc(short((node.algorithmic_complexity?.status==='heuristic'?'Предположение: ':node.algorithmic_complexity?.status==='upper_bound'?'Граница: ':'')+algorithmicLabel(node),43))}</text>`:'';}
+  function graphNodeClass(node,root,boundary) {const cls=node.kind==='fold'?'fold':node.id===root?'root':node.vendor?'vendor':node.kind||'';const self=node.id!==root&&node.parent_type&&node.parent_type===(state.symbol.parent_type||(state.symbol.kind==='class'?state.symbol.label:null))&&(!state.symbol.language||node.language===state.symbol.language);return cls+(boundary?' boundary':'')+(self?' self-method':'')+(state.inspectedNode===node.id?' inspected':'');}
+  function renderGraphNode(node,root,positions) {
+
+      const p=positions.get(String(node.id)),label=String(node.behavior==='module_initializer'?'Инициализация модуля':node.label||node.id),card=CodefactorGraph.nodeCard(node),offset=card.offset;
+      const boundary=node.unresolved?.reason==='type_not_analyzed';
+      const owner=graphNodeOwner(node);
+      const hidden=node.kind==='fold'?{nodes:0,branches:0}:state.graphView.hidden(String(node.id)),remote=node.kind!=='fold'&&state.lazyGraph?.remote(state.graphView,String(node.id)),busy=state.branchBusy.has(String(node.id));
+      const behavior=({getter:'Геттер по структуре',setter:'Сеттер по структуре',simple_leaf:'Короткая · без вызовов',module_initializer:'Инициализация модуля'})[node.behavior]||'';
+      const header=graphNodeHeading(node,card,offset,owner);
+      const actions=graphNodeActions(node,root,label,offset,hidden,remote,busy);
+      return `<g class="graph-node ${esc(graphNodeClass(node,root,boundary))}" data-graph-node="${esc(node.id)}" transform="translate(${p.x},${p.y})" tabindex="0" role="button" aria-label="Сведения о ${esc(label)}"><title>${esc(label)}\n${esc(owner)}\nПеретаскивание — перемещение, ↗ — переход</title><rect class="node-box" width="320" height="${card.height}" rx="10"/>${header}<text class="node-stats" x="14" y="${82+offset}">${graphNodeStats(node,boundary)}</text><text class="node-subtitle" x="14" y="${100+offset}">${esc(shortPath(node.file||node.category||'',43))}${node.line?':'+node.line:''}</text>${graphNodeCost(node,offset)}<text class="node-hidden" x="14" y="${151+offset}">${esc(graphNodeContinuation(node,boundary,remote,hidden,behavior))}</text>${actions}</g>`;
+
+  }
+  function bindGraphInteractions(svg,layout,width,height) {
+    const {positions,frames}=layout;let drag=null;
     svg.addEventListener('pointerdown',event=>{
       if(event.button!==0||event.target.closest('.node-action,[data-class-info]'))return;
       const node=event.target.closest('[data-graph-node]'),frame=event.target.closest('[data-class-frame]');if(event.target.closest('.graph-edge'))return;
@@ -315,6 +345,21 @@
     svg.addEventListener('pointerover',event=>{if(drag)return;const edge=event.target.closest('.conditional-edge[data-edge-index]');if(edge)showEdgeTooltip(layout.bundles[Number(edge.dataset.edgeIndex)],event);});
     svg.addEventListener('pointerout',event=>{if(event.target.closest('[data-edge-index]')&&!event.relatedTarget?.closest?.('[data-edge-index]'))$('#edge-tooltip').classList.add('hidden');});
     svg.addEventListener('keydown',event=>{if(['Enter',' '].includes(event.key)&&event.target.closest('[role=button]')){event.preventDefault();event.target.dispatchEvent(new MouseEvent('click',{bubbles:true}));}});
+  }
+  function renderGraph(center=false) {
+    const host=$('#graph'),data=state.graph;if(!data)return;
+    if(!data.nodes?.length){host.innerHTML='<div class="empty">Функция не найдена в графе.</div>';return;}
+    if($('#graph-view-mode').value==='tree'){renderChainTree();return;}host.classList.remove('chain-mode');
+    const layout=layoutGraph(data),{root,nodes,bundles,positions,frames}=layout,width=host.clientWidth||1000,height=host.clientHeight||500;state.graphLayout=layout;
+    if(center){const p=positions.get(root)||{x:0,y:0};state.pan=[width/2-(p.x+160)*state.scale,height/2-(p.y+nodeHeight(root)/2)*state.scale];}
+    const framesSvg=frames.map(frame=>renderGraphFrame(frame,positions)).join('');
+    const edgeSvg=bundles.map((bundle,index)=>renderGraphEdge(bundle,index,positions)).join('');
+    const nodeSvg=nodes.map(node=>renderGraphNode(node,root,positions)).join('');
+    host.innerHTML=`<svg class="graph-canvas" viewBox="0 0 ${width} ${height}" aria-label="Граф функции ${esc(state.symbol.label)}"><defs><marker id="arrow" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><path d="M0,0 L9,3.5 L0,7 Z" fill="#8a9dbd"/></marker></defs><g class="graph-world">${framesSvg}${edgeSvg}${nodeSvg}</g></svg>${layout.remaining?`<div class="graph-limit">Ещё ${num(layout.remaining)} раскрытых элементов.<button id="graph-more">Показать ещё 600</button></div>`:''}`;
+    $('#coverage').textContent=`На холсте ${num(nodes.length)} элементов · раскрыто ${num(layout.revealed)} из ${num(data.nodes.length)} узлов${renderCoverage()}${state.imported?' · импорт':''}`;
+    $('#neighbor-controls').innerHTML=[...state.graphView.neighborGroups].filter(([key])=>(state.graphView.neighborShown.get(key)||0)>0).map(([key,g])=>`<button data-neighbors-close="${esc(key)}">Свернуть ${g.sign<0?'вызывающие':'вызываемые'} методы</button>`).join('');
+    applyTransform();$('#edge-tooltip').classList.add('hidden');
+    bindGraphInteractions($('svg',host),layout,width,height);
   }
   function showEdgeTooltip(bundle,event) {
     const tooltip=$('#edge-tooltip'),stage=$('.graph-stage').getBoundingClientRect(),labels=new Map(state.graph.nodes.map(n=>[String(n.id),n.label]));
@@ -444,11 +489,12 @@
   async function loadConfig() {
     try {
       const data=await api('/api/config'),config=data.effective||{},limits=config.limits||{};
-      const globals=Object.entries(limits).filter(([key])=>!['by_language','by_path','by_entity','aggregates'].includes(key));
-      let html=`<section class="panel config-section"><h2>${data.path?'Конфигурация проекта':'Встроенные критерии'}</h2><p>${data.path?esc(data.path):'Файл analyzer.yaml / analyzer.yml не задан. Анализ выполнен со стандартными настройками.'}<br/>Ниже — активные настройки текущего анализа. Исходные файлы сохранены при запуске анализа.</p>${thresholdTable('Общие пороги',globals)}<p>Текущее правило проверки: нарушение фиксируется, когда значение строго больше порога. Приоритет: настройки сущности, пути, языка, затем общие. Порог — критерий проекта, а не универсальная оценка качества.</p></section>`;
+      const globals=Object.entries(limits).filter(([key])=>!['by_language','by_path','by_entity_glob','by_entity','aggregates'].includes(key));
+      let html=`<section class="panel config-section"><h2>${data.path?'Конфигурация проекта':'Встроенные критерии'}</h2><p>${data.path?esc(data.path):'Файл analyzer.yaml / analyzer.yml не задан. Анализ выполнен со стандартными настройками.'}<br/>Ниже — активные настройки текущего анализа. Исходные файлы сохранены при запуске анализа.</p>${thresholdTable('Общие пороги',globals)}<p>Текущее правило проверки: нарушение фиксируется, когда значение строго больше порога. Порядок применения: общие → язык → путь → шаблон сущности → точная сущность. Поздние правила переопределяют заданные уровни. Порог — критерий проекта, а не универсальная оценка качества.</p></section>`;
       for(const [key,title] of [['by_language','Пороги по языкам'],['by_entity','Пороги по сущностям']]){const tables=Object.entries(limits[key]||{}).map(([name,values])=>thresholdTable(name,Object.entries(values))).join('');if(tables)html+=`<section class="panel config-section"><h2>${title}</h2>${tables}</section>`;}
       const capabilities=data.strategy_capabilities||state.strategyCapabilities||{},fields=[['static_types','Статические типы'],['generics','Обобщённые типы'],['inheritance','Наследование / traits'],['closures','Замыкания'],['guards','Условия']];
       html+=`<section class="panel config-section"><h2>Возможности стратегий</h2><p>Заявленные возможности обработки конструкций языка. Поддержка конструкции не гарантирует полного разрешения динамических типов и вызовов.</p><div class="table-scroll"><table class="data-table"><thead><tr><th>Язык</th>${fields.map(([,label])=>`<th>${label}</th>`).join('')}</tr></thead><tbody>${Object.entries(capabilities).map(([language,caps])=>`<tr><th>${esc(language)}${!config.languages?.enabled?.length||config.languages.enabled.includes(language)?'':' · выключен'}</th>${fields.map(([key])=>`<td>${caps[key]?'Да':'Нет'}</td>`).join('')}</tr>`).join('')}</tbody></table></div></section>`;
+      if(limits.by_entity_glob?.length)html+=`<section class="panel config-section"><h2>Пороги по шаблонам сущностей</h2>${limits.by_entity_glob.map(({glob,...values})=>thresholdTable(glob,Object.entries(values))).join('')}</section>`;
       if(limits.by_path?.length)html+=`<section class="panel config-section"><h2>Пороги по путям</h2>${limits.by_path.map(({glob,...values})=>thresholdTable(glob,Object.entries(values))).join('')}</section>`;
       if(Object.keys(limits.aggregates||{}).length)html+=`<section class="panel config-section">${thresholdTable('Пороги сводных значений',Object.entries(limits.aggregates))}</section>`;
       const labels={paths:'Какие файлы анализируются',languages:'Языки анализа',vendor:'Код зависимостей',metrics:'Подсчёт метрик',algorithmic_complexity:'Алгоритмическая сложность',architecture:'Архитектурный анализ',graph:'Разрешение вызовов',cache:'Кеширование',external:'Внешние операции',sets:'Наборы сущностей',output:'Форматы экспорта'};
@@ -517,7 +563,7 @@
     if(format==='svg'){download('codefactor-relations.svg','image/svg+xml',xml);return;}
     const url=URL.createObjectURL(new Blob([xml],{type:'image/svg+xml;charset=utf-8'})),image=new Image();image.onload=()=>{const ratio=Math.min(1,8192/width,8192/height,Math.sqrt(16000000/(width*height))),canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(width*ratio));canvas.height=Math.max(1,Math.round(height*ratio));const ctx=canvas.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(image,0,0,canvas.width,canvas.height);canvas.toBlob(async blob=>{if(blob){const result=await CodefactorGraph.pngWithMetadata(blob,metadata),link=document.createElement('a'),blobUrl=URL.createObjectURL(result);link.href=blobUrl;link.download='codefactor-relations.png';link.click();setTimeout(()=>URL.revokeObjectURL(blobUrl),1000);}else toast('Не удалось создать PNG.');},'image/png');URL.revokeObjectURL(url);};image.onerror=()=>{URL.revokeObjectURL(url);toast('Не удалось создать PNG.');};image.src=url;
   }
-  function download(name,type,body) {const url=URL.createObjectURL(new Blob([body],{type})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+  const download = CodefactorUI.download;
   function exportSvg() {
     if(!state.graph)return null;
     // Export the visible layout at natural size, independent of viewport pan/zoom.
@@ -539,44 +585,65 @@
       const url=URL.createObjectURL(new Blob([svg.xml],{type:'image/svg+xml;charset=utf-8'})),img=new Image();img.onload=()=>{const canvas=document.createElement('canvas'),ratio=Math.min(1,8192/svg.width,8192/svg.height,Math.sqrt(16000000/(svg.width*svg.height)));canvas.width=Math.max(1,Math.round(svg.width*ratio));canvas.height=Math.max(1,Math.round(svg.height*ratio));const ctx=canvas.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(img,0,0,canvas.width,canvas.height);canvas.toBlob(async blob=>{if(blob){blob=await CodefactorGraph.pngWithMetadata(blob,CodefactorGraph.exportMetadata(data));const a=document.createElement('a'),blobUrl=URL.createObjectURL(blob);a.href=blobUrl;a.download='codefactor-graph.png';a.click();setTimeout(()=>URL.revokeObjectURL(blobUrl),1000);}else toast('Не удалось создать PNG. Используйте SVG.');},'image/png');URL.revokeObjectURL(url);};img.onerror=()=>{URL.revokeObjectURL(url);toast('Не удалось создать PNG.');};img.src=url;
     }
   }
-  document.addEventListener('click',event=>{
-    const target=event.target;
-    const pick=target.closest('[data-relation-pick]');if(pick){openRelationPicker(pick.dataset.relationPick,pick.dataset.relationExclude==='true');return;}
-    const pickToggle=target.closest('[data-relation-toggle]');if(pickToggle){const node=findFileNode(pickToggle.dataset.relationToggle,state.relationPicker.tree);if(node){node.collapsed=!node.collapsed;renderRelationPicker();}return;}
-    const pickNode=target.closest('[data-relation-node]');if(pickNode){const node=findFileNode(pickNode.dataset.relationNode,state.relationPicker.tree),selector=CodefactorTree.selector(node);if(pickNode.checked)state.relationPicker.selected.add(selector);else state.relationPicker.selected.delete(selector);renderRelationPicker();return;}
-    const relationEdge=target.closest('[data-relation-edge]');if(relationEdge){inspectRelation(state.relationLayout.segments[Number(relationEdge.dataset.relationEdge)].details);return;}
-    const relationCell=target.closest('[data-relation-cell]');if(relationCell){inspectRelation(state.relationMatrix[Number(relationCell.dataset.relationCell)].details);return;}
-    const relationExport=target.closest('[data-relation-export]');if(relationExport){exportRelations(relationExport.dataset.relationExport);return;}
-    if(target.closest('#relation-details-more')){inspectRelation(state.relationDetailIndices,state.relationDetailLimit+50);return;}
-    const fileTab=target.closest('[data-file-tab]');if(fileTab){if(!fileTab.disabled)switchFileTab(fileTab.dataset.fileTab);return;}
-    const tab=target.closest('[data-tab]');if(tab){switchTab(tab.dataset.tab);return;}
-    const toggle=target.closest('[data-tree-toggle]');if(toggle){const node=findFileNode(toggle.dataset.treeToggle);if(node){node.collapsed=!node.collapsed;renderTree();}return;}
-    const fileButton=target.closest('[data-tree-node]');if(fileButton){const node=findFileNode(fileButton.dataset.treeNode);if(!node)return;state.treeSelection=node.id;if(['directory','dir'].includes(node.kind))node.collapsed=!node.collapsed;else if(node.kind==='file'){node.collapsed=false;loadFile(node.path||node.id);}else{node.collapsed=false;state.imported=null;openGraph({...node,id:node.symbol_id||node.id,label:node.kind==='module_initializer'?node.name:node.fqn||node.name,kind:node.kind==='module_initializer'?'function':['method','function'].includes(node.kind)?node.kind:'class'});}renderTree();return;}
-    const source=target.closest('[data-source-link]');if(source){chooseTargets(state.sourceLinks[Number(source.dataset.sourceLink)]);return;}
-    if(Date.now()<state.suppressGraphClickUntil&&target.closest('#graph'))return;
-    const hidden=target.closest('[data-vendor-boundary]');if(hidden){inspectHiddenVendor(hidden.dataset.vendorBoundary);return;}
-    if(target.closest('#show-hidden-vendor')){state.vendor='expanded';$('#vendor-mode').value='expanded';$('#graph-inspector').classList.add('hidden');loadGraph();return;}
-    if(target.closest('#chain-more')){state.graphLimit+=600;renderGraph();return;}
-    const chain=target.closest('[data-chain-go]');if(chain){const node=state.graph?.nodes.find(n=>String(n.id)===chain.dataset.chainGo);if(node){if(node.kind==='unknown')inspectNode(node);else openGraph(node);}return;}
-    const go=target.closest('[data-graph-go]');if(go){const node=state.graph?.nodes.find(n=>String(n.id)===go.dataset.graphGo);if(!node)return;if(node.kind==='vendor_package'&&!state.imported){api(`/api/vendor/${encodeURIComponent(node.package||node.label)}`).then(()=>{state.vendor='expanded';$('#vendor-mode').value=state.vendor;loadGraph();}).catch(e=>toast(e.message));}else openGraph(node);return;}
-    const branchClose=target.closest('[data-branch-close]');if(branchClose){const id=branchClose.dataset.branchClose;state.branchTokens.set(id,(state.branchTokens.get(id)||0)+1);state.branchBusy.delete(id);if(id===state.graphView.root){state.branchEpoch++;state.branchBusy.clear();}state.graphView.close(id);renderGraph();return;}
-    const branch=target.closest('[data-branch-expand],[data-branch-all]');if(branch){expandBranch(branch.dataset.branchExpand||branch.dataset.branchAll,Boolean(branch.dataset.branchAll));return;}
-    const neighbors=target.closest('[data-neighbors-expand],[data-neighbors-all],[data-neighbors-close]');if(neighbors){const key=neighbors.dataset.neighborsExpand||neighbors.dataset.neighborsAll||neighbors.dataset.neighborsClose;if(neighbors.dataset.neighborsClose)state.graphView.closeNeighbors(key);else state.graphView.expandNeighbors(key,Boolean(neighbors.dataset.neighborsAll));$('#graph-inspector').classList.add('hidden');renderGraph();return;}
-    const fold=target.closest('[data-group-expand]');if(fold){state.graphView.groupExpanded.add(fold.dataset.groupExpand);renderGraph();return;}
-    const classGo=target.closest('[data-class-go]');if(classGo){openGraph({id:'type:'+classGo.dataset.classGo,label:classGo.dataset.classGo,kind:'class',language:classGo.dataset.classLanguage});return;}
-    const classInfo=target.closest('[data-class-info]');if(classInfo){const frame=state.graphLayout.frames.find(f=>f.id===classInfo.dataset.classInfo);if(frame)inspectClass(frame);return;}
-    const nodeBox=target.closest('[data-graph-node]');if(nodeBox){const node=state.graphLayout?.nodes.find(n=>String(n.id)===nodeBox.dataset.graphNode);if(node)inspectNode(node);return;}
-    const entry=target.closest('[data-history]');if(entry){goHistory(Number(entry.dataset.history));return;}
-    const edge=target.closest('.conditional-edge[data-edge-index]');if(edge){const bundle=state.graphLayout?.bundles[Number(edge.dataset.edgeIndex)];if(bundle)inspectEdge(bundle);return;}
-    const graphSource=target.closest('[data-graph-source-file]');if(graphSource){graphModal.close();switchTab('code');loadFile(graphSource.dataset.graphSourceFile,graphSource.dataset.jumpLine);return;}
-    if(target.closest('#more-group-members')){inspectNode(state.inspectedNodeObject,state.inspectedMemberLimit+50);return;}
-    if(target.closest('#more-external-calls')){inspectNode(state.inspectedNodeObject,state.inspectedMemberLimit+50);return;}
-    if(target.closest('#more-class-members')){inspectClass(state.inspectedClass,state.inspectedMemberLimit+50);return;}
-    if(target.closest('#more-call-details')){inspectEdge(state.inspectedBundle,state.inspectedCalls+50);return;}
-    const jump=target.closest('[data-jump-file]');if(jump){if($('#relations-modal').open)$('#relations-modal').close();switchTab('code');loadFile(jump.dataset.jumpFile,jump.dataset.jumpLine);return;}
-    const exportButton=target.closest('[data-export]');if(exportButton){exportGraph(exportButton.dataset.export);return;}
+  function handleRelationClick(target) {
+    const pick=target.closest('[data-relation-pick]');if(pick){openRelationPicker(pick.dataset.relationPick,pick.dataset.relationExclude==='true');return true;}
+    const pickToggle=target.closest('[data-relation-toggle]');if(pickToggle){const node=findFileNode(pickToggle.dataset.relationToggle,state.relationPicker.tree);if(node){node.collapsed=!node.collapsed;renderRelationPicker();}return true;}
+    const pickNode=target.closest('[data-relation-node]');if(pickNode){const node=findFileNode(pickNode.dataset.relationNode,state.relationPicker.tree),selector=CodefactorTree.selector(node);if(pickNode.checked)state.relationPicker.selected.add(selector);else state.relationPicker.selected.delete(selector);renderRelationPicker();return true;}
+    const relationEdge=target.closest('[data-relation-edge]');if(relationEdge){inspectRelation(state.relationLayout.segments[Number(relationEdge.dataset.relationEdge)].details);return true;}
+    const relationCell=target.closest('[data-relation-cell]');if(relationCell){inspectRelation(state.relationMatrix[Number(relationCell.dataset.relationCell)].details);return true;}
+    const relationExport=target.closest('[data-relation-export]');if(relationExport){exportRelations(relationExport.dataset.relationExport);return true;}
+    if(target.closest('#relation-details-more')){inspectRelation(state.relationDetailIndices,state.relationDetailLimit+50);return true;}
+    return false;
+  }
+  function handleTreeClick(target) {
+    const fileTab=target.closest('[data-file-tab]');if(fileTab){if(!fileTab.disabled)switchFileTab(fileTab.dataset.fileTab);return true;}
+    const tab=target.closest('[data-tab]');if(tab){switchTab(tab.dataset.tab);return true;}
+    const toggle=target.closest('[data-tree-toggle]');if(toggle){const node=findFileNode(toggle.dataset.treeToggle);if(node){node.collapsed=!node.collapsed;renderTree();}return true;}
+    const fileButton=target.closest('[data-tree-node]');if(fileButton){const node=findFileNode(fileButton.dataset.treeNode);if(!node)return true;state.treeSelection=node.id;if(['directory','dir'].includes(node.kind))node.collapsed=!node.collapsed;else if(node.kind==='file'){node.collapsed=false;loadFile(node.path||node.id);}else{node.collapsed=false;state.imported=null;openGraph({...node,id:node.symbol_id||node.id,label:node.kind==='module_initializer'?node.name:node.fqn||node.name,kind:node.kind==='module_initializer'?'function':['method','function'].includes(node.kind)?node.kind:'class'});}renderTree();return true;}
+    const source=target.closest('[data-source-link]');if(source){chooseTargets(state.sourceLinks[Number(source.dataset.sourceLink)]);return true;}
+    return false;
+  }
+  function handleGraphNavigationClick(target) {
+    if(Date.now()<state.suppressGraphClickUntil&&target.closest('#graph'))return true;
+    const hidden=target.closest('[data-vendor-boundary]');if(hidden){inspectHiddenVendor(hidden.dataset.vendorBoundary);return true;}
+    if(target.closest('#show-hidden-vendor')){state.vendor='expanded';$('#vendor-mode').value='expanded';$('#graph-inspector').classList.add('hidden');loadGraph();return true;}
+    if(target.closest('#chain-more')){state.graphLimit+=600;renderGraph();return true;}
+    const chain=target.closest('[data-chain-go]');if(chain){const node=state.graph?.nodes.find(n=>String(n.id)===chain.dataset.chainGo);if(node){if(node.kind==='unknown')inspectNode(node);else openGraph(node);}return true;}
+    const go=target.closest('[data-graph-go]');if(go){const node=state.graph?.nodes.find(n=>String(n.id)===go.dataset.graphGo);if(!node)return true;if(node.kind==='vendor_package'&&!state.imported){api(`/api/vendor/${encodeURIComponent(node.package||node.label)}`).then(()=>{state.vendor='expanded';$('#vendor-mode').value=state.vendor;loadGraph();}).catch(e=>toast(e.message));}else openGraph(node);return true;}
+    return handleGraphBranchClick(target);
+  }
+  function handleGraphBranchClick(target) {
+    const branchClose=target.closest('[data-branch-close]');if(branchClose){const id=branchClose.dataset.branchClose;state.branchTokens.set(id,(state.branchTokens.get(id)||0)+1);state.branchBusy.delete(id);if(id===state.graphView.root){state.branchEpoch++;state.branchBusy.clear();}state.graphView.close(id);renderGraph();return true;}
+    const branch=target.closest('[data-branch-expand],[data-branch-all]');if(branch){expandBranch(branch.dataset.branchExpand||branch.dataset.branchAll,Boolean(branch.dataset.branchAll));return true;}
+    const neighbors=target.closest('[data-neighbors-expand],[data-neighbors-all],[data-neighbors-close]');if(neighbors){const key=neighbors.dataset.neighborsExpand||neighbors.dataset.neighborsAll||neighbors.dataset.neighborsClose;if(neighbors.dataset.neighborsClose)state.graphView.closeNeighbors(key);else state.graphView.expandNeighbors(key,Boolean(neighbors.dataset.neighborsAll));$('#graph-inspector').classList.add('hidden');renderGraph();return true;}
+    return false;
+  }
+  function handleGraphInspectionClick(target) {
+    const fold=target.closest('[data-group-expand]');if(fold){state.graphView.groupExpanded.add(fold.dataset.groupExpand);renderGraph();return true;}
+    const classGo=target.closest('[data-class-go]');if(classGo){openGraph({id:'type:'+classGo.dataset.classGo,label:classGo.dataset.classGo,kind:'class',language:classGo.dataset.classLanguage});return true;}
+    const classInfo=target.closest('[data-class-info]');if(classInfo){const frame=state.graphLayout.frames.find(f=>f.id===classInfo.dataset.classInfo);if(frame)inspectClass(frame);return true;}
+    const nodeBox=target.closest('[data-graph-node]');if(nodeBox){const node=state.graphLayout?.nodes.find(n=>String(n.id)===nodeBox.dataset.graphNode);if(node)inspectNode(node);return true;}
+    const entry=target.closest('[data-history]');if(entry){goHistory(Number(entry.dataset.history));return true;}
+    const edge=target.closest('.conditional-edge[data-edge-index]');if(edge){const bundle=state.graphLayout?.bundles[Number(edge.dataset.edgeIndex)];if(bundle)inspectEdge(bundle);return true;}
+    const graphSource=target.closest('[data-graph-source-file]');if(graphSource){graphModal.close();switchTab('code');loadFile(graphSource.dataset.graphSourceFile,graphSource.dataset.jumpLine);return true;}
+    if(target.closest('#more-group-members')){inspectNode(state.inspectedNodeObject,state.inspectedMemberLimit+50);return true;}
+    if(target.closest('#more-external-calls')){inspectNode(state.inspectedNodeObject,state.inspectedMemberLimit+50);return true;}
+    if(target.closest('#more-class-members')){inspectClass(state.inspectedClass,state.inspectedMemberLimit+50);return true;}
+    if(target.closest('#more-call-details')){inspectEdge(state.inspectedBundle,state.inspectedCalls+50);return true;}
+    return false;
+  }
+  function handleExportAndRetryClick(target) {
+    const jump=target.closest('[data-jump-file]');if(jump){if($('#relations-modal').open)$('#relations-modal').close();switchTab('code');loadFile(jump.dataset.jumpFile,jump.dataset.jumpLine);return true;}
+    const exportButton=target.closest('[data-export]');if(exportButton){exportGraph(exportButton.dataset.export);return true;}
     if(target.closest('#graph-more')){state.graphLimit+=600;renderGraph();}
     if(target.closest('#retry-file-issues'))loadFileIssues();if(target.closest('#retry-graph'))loadGraph();if(target.closest('#retry-quality'))loadViolations();if(target.closest('#retry-config'))loadConfig();
+    return false;
+  }
+  document.addEventListener('click', event => {
+    const target = event.target;
+    for (const handler of [handleRelationClick, handleTreeClick, handleGraphNavigationClick, handleGraphInspectionClick, handleExportAndRetryClick]) {
+      if (handler(target)) break;
+    }
   });
   $('#file-severity').onchange=()=>{state.fileIssuesPage=1;loadFileIssues();};
   $('#file-issues-prev').onclick=()=>{if(state.fileIssuesPage>1){state.fileIssuesPage--;loadFileIssues();}};

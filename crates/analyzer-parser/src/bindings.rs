@@ -1,5 +1,12 @@
 //! Lexical, source-ordered bindings. Never infer a receiver from a later assignment.
-use super::*;
+use crate::support::import_applies as applies;
+use crate::{php_names, properties, support::*, syntax::*, type_index::*};
+use analyzer_core::ir::*;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
+use tree_sitter::Node;
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Binding {
     Type(String),
@@ -76,16 +83,7 @@ fn typed(raw: &str, dialect: Dialect) -> Binding {
         .map(Binding::Type)
         .unwrap_or(Binding::Unknown)
 }
-fn contains(scope: &SourceRange, line: usize, col: usize) -> bool {
-    (scope.start_line, scope.start_column) <= (line, col)
-        && (line, col) <= (scope.end_line, scope.end_column)
-}
-pub(super) fn applies(import: &Import, range: &SourceRange) -> bool {
-    import
-        .scope
-        .as_ref()
-        .is_none_or(|s| contains(s, range.start_line, range.start_column))
-}
+
 fn import_name(i: &Import) -> &str {
     i.alias.as_deref().unwrap_or_else(|| {
         i.path
@@ -195,6 +193,24 @@ fn exception(node: Node<'_>, source: &str, dialect: Dialect) -> Option<(String, 
     }
     None
 }
+type BindingEnv = BTreeMap<String, Binding>;
+enum BindingWork<'tree> {
+    Visit(Node<'tree>, usize, bool),
+    Finish(Node<'tree>, usize, Vec<(String, Option<Binding>)>),
+    Function(Node<'tree>, usize),
+    ClassBody(Node<'tree>, usize),
+    Discard(usize, Option<(usize, String)>),
+    Loop(usize, usize, Vec<String>, bool),
+    Branches(Node<'tree>, usize),
+    Merge(usize, usize, usize),
+    LogicalRight(Node<'tree>, usize),
+    LogicalDone(Node<'tree>, usize, usize),
+    Control(usize, Vec<usize>),
+}
+struct BindingTraversal<'tree> {
+    environments: Vec<Option<BindingEnv>>,
+    pending: Vec<BindingWork<'tree>>,
+}
 struct Walker<'a> {
     dialect: Dialect,
     source: &'a str,
@@ -207,433 +223,656 @@ struct Walker<'a> {
 }
 impl Walker<'_> {
     fn visit(&mut self, node: Node<'_>, env: &mut BTreeMap<String, Binding>, root: bool) {
-        type Env = BTreeMap<String, Binding>;
-        enum Work<'tree> {
-            Visit(Node<'tree>, usize, bool),
-            Finish(Node<'tree>, usize, Vec<(String, Option<Binding>)>),
-            Function(Node<'tree>, usize),
-            ClassBody(Node<'tree>, usize),
-            Discard(usize, Option<(usize, String)>),
-            Loop(usize, usize, Vec<String>, bool),
-            Branches(Node<'tree>, usize),
-            Merge(usize, usize, usize),
-            LogicalRight(Node<'tree>, usize),
-            LogicalDone(Node<'tree>, usize, usize),
-            Control(usize, Vec<usize>),
+        let mut traversal = BindingTraversal {
+            environments: vec![Some(std::mem::take(env))],
+            pending: vec![BindingWork::Visit(node, 0, root)],
+        };
+        while let Some(work) = traversal.pending.pop() {
+            if let Some((node, slot, root)) = self.resume_binding(work, &mut traversal) {
+                self.visit_binding_node(node, slot, root, &mut traversal);
+            }
         }
-        // A slot is shared by ordinary descendants. Only the same scope and
-        // branch boundaries as before clone it, with explicit merge continuations.
-        let mut environments: Vec<Option<Env>> = vec![Some(std::mem::take(env))];
-        let mut pending = vec![Work::Visit(node, 0, root)];
-        while let Some(work) = pending.pop() {
-            let (node, slot, root) = match work {
-                Work::Visit(node, slot, root) => (node, slot, root),
-                Work::Finish(node, slot, before) => {
-                    let env = environments[slot].as_mut().unwrap();
-                    if let Some((left, value)) = assignment(node) {
-                        if let Some(n) = name(left, self.source) {
-                            let callable = value
-                                .filter(|v| is_function(v.kind(), self.dialect))
-                                .and_then(|_| self.nested.get(&(self.owner.to_owned(), n.clone())))
-                                .map(|fqn| Binding::Function(fqn.clone()));
-                            let ty = callable
-                                .or_else(|| {
-                                    child(node, "type").and_then(|n| {
-                                        let binding = typed(snippet(n, self.source), self.dialect);
-                                        (!(matches!(
-                                            self.dialect,
-                                            Dialect::JavaScript | Dialect::TypeScript
-                                        ) && binding == Binding::Unknown
-                                            && value.is_some()))
-                                        .then_some(binding)
-                                    })
-                                })
-                                .or_else(|| value.map(|v| self.value(v, env)))
-                                .unwrap_or(Binding::Unknown);
-                            env.insert(n, ty);
-                        }
-                    }
-                    if let Some((left, _)) = assignment(node) {
-                        if name(left, self.source).is_none() {
-                            for n in pattern_names(left, self.source) {
-                                env.insert(n, Binding::Unknown);
-                            }
-                        }
-                    }
-                    for (n, value) in before {
-                        if let Some(value) = value {
-                            env.insert(n, value);
-                        } else {
-                            env.remove(&n);
-                        }
-                    }
-                    continue;
-                }
-                Work::Function(node, slot) => {
-                    if let Some(n) = text_field(node, "name", self.source) {
-                        if let Some(fqn) = self.nested.get(&(self.owner.to_owned(), n.clone())) {
-                            environments[slot]
-                                .as_mut()
-                                .unwrap()
-                                .insert(n, Binding::Function(fqn.clone()));
-                        }
-                    }
-                    continue;
-                }
-                Work::ClassBody(node, slot) => {
-                    if let Some(body) = child(node, "body") {
-                        let local = environments.len();
-                        environments.push(environments[slot].clone());
-                        pending.push(Work::Discard(local, None));
-                        pending.push(Work::Visit(body, local, false));
-                    }
-                    continue;
-                }
-                Work::Discard(local, invalidated) => {
-                    environments[local] = None;
-                    if let Some((slot, n)) = invalidated {
-                        environments[slot]
-                            .as_mut()
-                            .unwrap()
-                            .insert(n, Binding::Unknown);
-                    }
-                    continue;
-                }
-                Work::Loop(slot, local, bound, scoped) => {
-                    let local = environments[local].take().unwrap();
-                    let env = environments[slot].as_mut().unwrap();
-                    for (n, value) in local {
-                        if env.get(&n) != Some(&value) && !(scoped && bound.contains(&n)) {
-                            env.insert(n, Binding::Unknown);
-                        }
-                    }
-                    continue;
-                }
-                Work::Branches(node, slot) => {
-                    let consequent = environments.len();
-                    environments.push(environments[slot].clone());
-                    let alternative = environments.len();
-                    environments.push(environments[slot].clone());
-                    pending.push(Work::Merge(slot, consequent, alternative));
-                    if let Some(branch) = child(node, "alternative") {
-                        pending.push(Work::Visit(branch, alternative, false));
-                    }
-                    if let Some(branch) = child(node, "consequence") {
-                        pending.push(Work::Visit(branch, consequent, false));
-                    }
-                    continue;
-                }
-                Work::Merge(slot, consequent, alternative) => {
-                    let consequent = environments[consequent].take().unwrap();
-                    let alternative = environments[alternative].take().unwrap();
-                    let env = environments[slot].as_mut().unwrap();
-                    for key in env.keys().cloned().collect::<Vec<_>>() {
-                        env.insert(
-                            key.clone(),
-                            merge_types([
-                                consequent.get(&key).cloned().unwrap_or(Binding::Unknown),
-                                alternative.get(&key).cloned().unwrap_or(Binding::Unknown),
-                            ]),
-                        );
-                    }
-                    continue;
-                }
-                Work::LogicalRight(node, slot) => {
-                    let right = environments.len();
-                    environments.push(environments[slot].clone());
-                    pending.push(Work::LogicalDone(node, slot, right));
-                    if let Some(value) = child(node, "right") {
-                        pending.push(Work::Visit(value, right, false));
-                    }
-                    continue;
-                }
-                Work::LogicalDone(node, slot, right) => {
-                    let mut right = environments[right].take().unwrap();
-                    if node.kind() == "augmented_assignment_expression" {
-                        if let (Some(left), Some(value)) = (
-                            child(node, "left").and_then(|left| name(left, self.source)),
-                            child(node, "right"),
-                        ) {
-                            right.insert(left, self.value(value, &right));
-                        }
-                    }
-                    let env = environments[slot].as_mut().unwrap();
-                    for key in env.keys().cloned().collect::<Vec<_>>() {
-                        env.insert(
-                            key.clone(),
-                            merge_types([
-                                env.get(&key).cloned().unwrap_or(Binding::Unknown),
-                                right.get(&key).cloned().unwrap_or(Binding::Unknown),
-                            ]),
-                        );
-                    }
-                    continue;
-                }
-                Work::Control(slot, locals) => {
-                    let mut changed = BTreeSet::new();
-                    for local in locals {
-                        for (n, value) in environments[local].take().unwrap() {
-                            if environments[slot].as_ref().unwrap().get(&n) != Some(&value) {
-                                changed.insert(n);
-                            }
-                        }
-                    }
-                    for n in changed {
-                        environments[slot]
-                            .as_mut()
-                            .unwrap()
-                            .insert(n, Binding::Unknown);
-                    }
-                    continue;
-                }
-            };
-            if self.function.is_module_initializer() {
-                let r = range(node, Path::new(""));
-                let scope = &self.function.range;
-                if (r.end_line, r.end_column) < (scope.start_line, scope.start_column)
-                    || (r.start_line, r.start_column) > (scope.end_line, scope.end_column)
-                {
-                    continue;
+        *env = traversal.environments[0].take().unwrap();
+    }
+    fn resume_binding<'tree>(
+        &mut self,
+        work: BindingWork<'tree>,
+        traversal: &mut BindingTraversal<'tree>,
+    ) -> Option<(Node<'tree>, usize, bool)> {
+        match work {
+            BindingWork::Visit(node, slot, root) => Some((node, slot, root)),
+            BindingWork::Finish(node, slot, before) => {
+                self.resume_finish(node, slot, before, traversal);
+                None
+            }
+            BindingWork::Function(node, slot) => {
+                self.resume_function(node, slot, traversal);
+                None
+            }
+            BindingWork::ClassBody(node, slot) => {
+                self.resume_class_body(node, slot, traversal);
+                None
+            }
+            BindingWork::Discard(local, invalidated) => {
+                self.resume_discard(local, invalidated, traversal);
+                None
+            }
+            BindingWork::Loop(slot, local, bound, scoped) => {
+                self.resume_loop(slot, local, bound, scoped, traversal);
+                None
+            }
+            BindingWork::Branches(node, slot) => {
+                self.resume_branches(node, slot, traversal);
+                None
+            }
+            BindingWork::Merge(slot, consequent, alternative) => {
+                self.resume_merge(slot, consequent, alternative, traversal);
+                None
+            }
+            BindingWork::LogicalRight(node, slot) => {
+                self.resume_logical_right(node, slot, traversal);
+                None
+            }
+            BindingWork::LogicalDone(node, slot, right) => {
+                self.resume_logical_done(node, slot, right, traversal);
+                None
+            }
+            BindingWork::Control(slot, locals) => {
+                self.resume_control(slot, locals, traversal);
+                None
+            }
+        }
+    }
+    fn resume_finish<'tree>(
+        &mut self,
+        node: Node<'tree>,
+        slot: usize,
+        before: Vec<(String, Option<Binding>)>,
+        traversal: &mut BindingTraversal<'tree>,
+    ) {
+        let environments = &mut traversal.environments;
+
+        let env = environments[slot].as_mut().unwrap();
+        if let Some((left, value)) = assignment(node) {
+            if let Some(n) = name(left, self.source) {
+                let callable = value
+                    .filter(|v| is_function(v.kind(), self.dialect))
+                    .and_then(|_| self.nested.get(&(self.owner.to_owned(), n.clone())))
+                    .map(|fqn| Binding::Function(fqn.clone()));
+                let ty = callable
+                    .or_else(|| {
+                        child(node, "type").and_then(|n| {
+                            let binding = typed(snippet(n, self.source), self.dialect);
+                            (!(matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript)
+                                && binding == Binding::Unknown
+                                && value.is_some()))
+                            .then_some(binding)
+                        })
+                    })
+                    .or_else(|| value.map(|v| self.value(v, env)))
+                    .unwrap_or(Binding::Unknown);
+                env.insert(n, ty);
+            }
+        }
+        if let Some((left, _)) = assignment(node) {
+            if name(left, self.source).is_none() {
+                for n in pattern_names(left, self.source) {
+                    env.insert(n, Binding::Unknown);
                 }
             }
-            if is_type(node.kind(), self.dialect) {
-                if self.function.is_module_initializer() && self.dialect == Dialect::Python {
-                    pending.push(Work::ClassBody(node, slot));
-                    if let Some(bases) = child(node, "superclasses") {
-                        pending.push(Work::Visit(bases, slot, false));
-                    }
-                }
-                continue;
+        }
+        for (n, value) in before {
+            if let Some(value) = value {
+                env.insert(n, value);
+            } else {
+                env.remove(&n);
             }
-            if is_function(node.kind(), self.dialect) {
-                pending.push(Work::Function(node, slot));
-                if self.function.is_module_initializer() && self.dialect == Dialect::Python {
-                    if let Some(annotation) = child(node, "return_type") {
-                        pending.push(Work::Visit(annotation, slot, false));
-                    }
-                    if let Some(parameters) = child(node, "parameters") {
-                        pending.push(Work::Visit(parameters, slot, false));
-                    }
-                }
-                continue;
+        }
+    }
+    fn resume_function<'tree>(
+        &mut self,
+        node: Node<'tree>,
+        slot: usize,
+        traversal: &mut BindingTraversal<'tree>,
+    ) {
+        let environments = &mut traversal.environments;
+
+        if let Some(n) = text_field(node, "name", self.source) {
+            if let Some(fqn) = self.nested.get(&(self.owner.to_owned(), n.clone())) {
+                environments[slot]
+                    .as_mut()
+                    .unwrap()
+                    .insert(n, Binding::Function(fqn.clone()));
             }
-            let env = environments[slot].as_mut().unwrap();
-            self.bind_call(node, env);
-            if [
-                "import_statement",
-                "import_from_statement",
-                "namespace_use_declaration",
-                "use_declaration",
-            ]
-            .contains(&node.kind())
+        }
+    }
+    fn resume_class_body<'tree>(
+        &mut self,
+        node: Node<'tree>,
+        slot: usize,
+        traversal: &mut BindingTraversal<'tree>,
+    ) {
+        let pending = &mut traversal.pending;
+        let environments = &mut traversal.environments;
+
+        if let Some(body) = child(node, "body") {
+            let local = environments.len();
+            environments.push(environments[slot].clone());
+            pending.push(BindingWork::Discard(local, None));
+            pending.push(BindingWork::Visit(body, local, false));
+        }
+    }
+    fn resume_discard<'tree>(
+        &mut self,
+        local: usize,
+        invalidated: Option<(usize, String)>,
+        traversal: &mut BindingTraversal<'tree>,
+    ) {
+        let environments = &mut traversal.environments;
+
+        environments[local] = None;
+        if let Some((slot, n)) = invalidated {
+            environments[slot]
+                .as_mut()
+                .unwrap()
+                .insert(n, Binding::Unknown);
+        }
+    }
+    fn resume_loop<'tree>(
+        &mut self,
+        slot: usize,
+        local: usize,
+        bound: Vec<String>,
+        scoped: bool,
+        traversal: &mut BindingTraversal<'tree>,
+    ) {
+        let environments = &mut traversal.environments;
+
+        let local = environments[local].take().unwrap();
+        let env = environments[slot].as_mut().unwrap();
+        for (n, value) in local {
+            if env.get(&n) != Some(&value) && !(scoped && bound.contains(&n)) {
+                env.insert(n, Binding::Unknown);
+            }
+        }
+    }
+    fn resume_branches<'tree>(
+        &mut self,
+        node: Node<'tree>,
+        slot: usize,
+        traversal: &mut BindingTraversal<'tree>,
+    ) {
+        let pending = &mut traversal.pending;
+        let environments = &mut traversal.environments;
+
+        let consequent = environments.len();
+        environments.push(environments[slot].clone());
+        let alternative = environments.len();
+        environments.push(environments[slot].clone());
+        pending.push(BindingWork::Merge(slot, consequent, alternative));
+        if let Some(branch) = child(node, "alternative") {
+            pending.push(BindingWork::Visit(branch, alternative, false));
+        }
+        if let Some(branch) = child(node, "consequence") {
+            pending.push(BindingWork::Visit(branch, consequent, false));
+        }
+    }
+    fn resume_merge<'tree>(
+        &mut self,
+        slot: usize,
+        consequent: usize,
+        alternative: usize,
+        traversal: &mut BindingTraversal<'tree>,
+    ) {
+        let environments = &mut traversal.environments;
+
+        let consequent = environments[consequent].take().unwrap();
+        let alternative = environments[alternative].take().unwrap();
+        let env = environments[slot].as_mut().unwrap();
+        for key in env.keys().cloned().collect::<Vec<_>>() {
+            env.insert(
+                key.clone(),
+                merge_types([
+                    consequent.get(&key).cloned().unwrap_or(Binding::Unknown),
+                    alternative.get(&key).cloned().unwrap_or(Binding::Unknown),
+                ]),
+            );
+        }
+    }
+    fn resume_logical_right<'tree>(
+        &mut self,
+        node: Node<'tree>,
+        slot: usize,
+        traversal: &mut BindingTraversal<'tree>,
+    ) {
+        let pending = &mut traversal.pending;
+        let environments = &mut traversal.environments;
+
+        let right = environments.len();
+        environments.push(environments[slot].clone());
+        pending.push(BindingWork::LogicalDone(node, slot, right));
+        if let Some(value) = child(node, "right") {
+            pending.push(BindingWork::Visit(value, right, false));
+        }
+    }
+    fn resume_logical_done<'tree>(
+        &mut self,
+        node: Node<'tree>,
+        slot: usize,
+        right: usize,
+        traversal: &mut BindingTraversal<'tree>,
+    ) {
+        let environments = &mut traversal.environments;
+
+        let mut right = environments[right].take().unwrap();
+        if node.kind() == "augmented_assignment_expression" {
+            if let (Some(left), Some(value)) = (
+                child(node, "left").and_then(|left| name(left, self.source)),
+                child(node, "right"),
+            ) {
+                right.insert(left, self.value(value, &right));
+            }
+        }
+        let env = environments[slot].as_mut().unwrap();
+        for key in env.keys().cloned().collect::<Vec<_>>() {
+            env.insert(
+                key.clone(),
+                merge_types([
+                    env.get(&key).cloned().unwrap_or(Binding::Unknown),
+                    right.get(&key).cloned().unwrap_or(Binding::Unknown),
+                ]),
+            );
+        }
+    }
+    fn resume_control<'tree>(
+        &mut self,
+        slot: usize,
+        locals: Vec<usize>,
+        traversal: &mut BindingTraversal<'tree>,
+    ) {
+        let environments = &mut traversal.environments;
+
+        let mut changed = BTreeSet::new();
+        for local in locals {
+            for (n, value) in environments[local].take().unwrap() {
+                if environments[slot].as_ref().unwrap().get(&n) != Some(&value) {
+                    changed.insert(n);
+                }
+            }
+        }
+        for n in changed {
+            environments[slot]
+                .as_mut()
+                .unwrap()
+                .insert(n, Binding::Unknown);
+        }
+    }
+    fn visit_declaration<'tree>(
+        &mut self,
+        node: Node<'tree>,
+        slot: usize,
+        traversal: &mut BindingTraversal<'tree>,
+    ) -> bool {
+        let pending = &mut traversal.pending;
+        if self.function.is_module_initializer() {
+            let r = range(node, Path::new(""));
+            let scope = &self.function.range;
+            if (r.end_line, r.end_column) < (scope.start_line, scope.start_column)
+                || (r.start_line, r.start_column) > (scope.end_line, scope.end_column)
             {
-                let r = range(node, Path::new(""));
-                for i in self
-                    .imports
-                    .iter()
-                    .filter(|i| contains(&r, i.range.start_line, i.range.start_column))
-                {
-                    env.insert(import_name(i).to_owned(), import_binding(i));
-                }
-                continue;
+                return true;
             }
-            if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript)
-                && node.kind() == "catch_clause"
-            {
-                let mut local = env.clone();
-                if let Some(parameter) = child(node, "parameter") {
-                    for n in pattern_names(parameter, self.source) {
-                        local.insert(n, Binding::Unknown);
-                    }
-                }
-                let local_slot = environments.len();
-                environments.push(Some(local));
-                pending.push(Work::Discard(local_slot, None));
-                pending.extend(
-                    named_children(node)
-                        .into_iter()
-                        .rev()
-                        .map(|c| Work::Visit(c, local_slot, false)),
-                );
-                continue;
-            }
-            if let Some((n, ty)) = exception(node, self.source, self.dialect) {
-                let ty = if self.dialect == Dialect::Php {
-                    match ty {
-                        Binding::Type(raw) => typed_in_scope(
-                            &raw,
-                            self.dialect,
-                            self.owner,
-                            self.imports,
-                            &range(node, Path::new("")),
-                        ),
-                        binding => binding,
-                    }
-                } else {
-                    ty
-                };
-                let mut local = env.clone();
-                local.insert(n.clone(), ty);
-                let local_slot = environments.len();
-                environments.push(Some(local));
-                pending.push(Work::Discard(
-                    local_slot,
-                    (self.dialect == Dialect::Python).then_some((slot, n)),
-                ));
-                pending.extend(
-                    named_children(node)
-                        .into_iter()
-                        .rev()
-                        .map(|c| Work::Visit(c, local_slot, false)),
-                );
-                continue;
-            }
-            if is_loop(node.kind()) {
-                let mut local = env.clone();
-                let mut bound = child(node, "left")
-                    .or_else(|| child(node, "pattern"))
-                    .map(|n| pattern_names(n, self.source))
-                    .unwrap_or_default();
-                if node.kind() == "foreach_statement" {
-                    for n in named_children(node)
-                        .into_iter()
-                        .filter(|n| child(node, "body").is_none_or(|b| b.id() != n.id()))
-                        .skip(1)
-                    {
-                        bound.extend(pattern_names(n, self.source));
-                    }
-                }
-                let lexical_initializer =
-                    child(node, "initializer").filter(|n| n.kind() == "lexical_declaration");
-                if let Some(initializer) = lexical_initializer {
-                    let mut children_cursor = initializer.walk();
-                    for d in initializer.named_children(&mut children_cursor) {
-                        if let Some(pattern) = child(d, "name") {
-                            bound.extend(pattern_names(pattern, self.source));
-                        }
-                    }
-                }
-                let scoped = self.dialect == Dialect::Rust
-                    || (matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript)
-                        && (lexical_initializer.is_some()
-                            || child(node, "kind").is_some_and(|n| {
-                                ["let", "const"].contains(&snippet(n, self.source))
-                            })));
-                for n in &bound {
-                    local.insert(n.clone(), Binding::Unknown);
-                }
-                let local_slot = environments.len();
-                environments.push(Some(local));
-                pending.push(Work::Loop(slot, local_slot, bound, scoped));
-                let body = child(node, "body");
-                if let Some(body) = body {
-                    pending.push(Work::Visit(body, local_slot, false));
-                }
-                pending.extend(
-                    named_children(node)
-                        .into_iter()
-                        .filter(|c| body.is_none_or(|b| b.id() != c.id()))
-                        .rev()
-                        .map(|c| Work::Visit(c, local_slot, false)),
-                );
-                continue;
-            }
-            if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript)
-                && matches!(node.kind(), "if_statement" | "ternary_expression")
-            {
-                pending.push(Work::Branches(node, slot));
-                if let Some(condition) = child(node, "condition") {
-                    pending.push(Work::Visit(condition, slot, false));
-                }
-                continue;
-            }
-            if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript)
-                && matches!(
-                    node.kind(),
-                    "augmented_assignment_expression" | "binary_expression"
-                )
-                && child(node, "operator").is_some_and(|operator| {
-                    matches!(
-                        snippet(operator, self.source),
-                        "&&=" | "||=" | "??=" | "&&" | "||" | "??"
-                    )
-                })
-            {
-                pending.push(Work::LogicalRight(node, slot));
-                if let Some(left) = child(node, "left") {
-                    pending.push(Work::Visit(left, slot, false));
-                }
-                continue;
-            }
-            let control = [
-                "if_statement",
-                "try_statement",
-                "match_statement",
-                "match_expression",
-                "switch_statement",
-                "conditional_expression",
-                "ternary_expression",
-            ]
-            .contains(&node.kind())
-                || (node.kind() == "augmented_assignment_expression"
-                    && child(node, "operator").is_some_and(|operator| {
-                        matches!(snippet(operator, self.source), "&&=" | "||=" | "??=")
-                    }));
-            if control {
-                let mut visits = Vec::new();
-                let mut locals = Vec::new();
-                for c in named_children(node) {
-                    let local = environments.len();
-                    environments.push(environments[slot].clone());
-                    locals.push(local);
-                    visits.push(Work::Visit(c, local, false));
-                }
-                pending.push(Work::Control(slot, locals));
-                pending.extend(visits.into_iter().rev());
-                continue;
-            }
-            let block = !root
-                && matches!(
-                    self.dialect,
-                    Dialect::JavaScript | Dialect::TypeScript | Dialect::Rust
-                )
-                && ["block", "statement_block"].contains(&node.kind());
-            let mut declared = Vec::new();
-            if block {
-                let mut children_cursor = node.walk();
-                for c in node.named_children(&mut children_cursor) {
-                    if c.kind() == "let_declaration" {
-                        if let Some(n) = child(c, "pattern").and_then(|n| name(n, self.source)) {
-                            declared.push(n);
-                        }
-                    }
-                    if c.kind() == "lexical_declaration" {
-                        let mut children_cursor = c.walk();
-                        for d in c.named_children(&mut children_cursor) {
-                            if let Some(n) = child(d, "name").and_then(|n| name(n, self.source)) {
-                                declared.push(n);
-                            }
-                        }
-                    }
+        }
+        if is_type(node.kind(), self.dialect) {
+            if self.function.is_module_initializer() && self.dialect == Dialect::Python {
+                pending.push(BindingWork::ClassBody(node, slot));
+                if let Some(bases) = child(node, "superclasses") {
+                    pending.push(BindingWork::Visit(bases, slot, false));
                 }
             }
-            // Only declarations in this block need restoration. Other assignments escape.
-            let before: Vec<_> = declared
+            return true;
+        }
+        if is_function(node.kind(), self.dialect) {
+            pending.push(BindingWork::Function(node, slot));
+            if self.function.is_module_initializer() && self.dialect == Dialect::Python {
+                if let Some(annotation) = child(node, "return_type") {
+                    pending.push(BindingWork::Visit(annotation, slot, false));
+                }
+                if let Some(parameters) = child(node, "parameters") {
+                    pending.push(BindingWork::Visit(parameters, slot, false));
+                }
+            }
+            return true;
+        }
+        false
+    }
+    fn visit_import<'tree>(
+        &mut self,
+        node: Node<'tree>,
+        slot: usize,
+        traversal: &mut BindingTraversal<'tree>,
+    ) -> bool {
+        let environments = &mut traversal.environments;
+        let env = environments[slot].as_mut().unwrap();
+        if [
+            "import_statement",
+            "import_from_statement",
+            "namespace_use_declaration",
+            "use_declaration",
+        ]
+        .contains(&node.kind())
+        {
+            let r = range(node, Path::new(""));
+            for i in self
+                .imports
                 .iter()
-                .map(|name| (name.clone(), env.get(name).cloned()))
-                .collect();
-            for n in &declared {
-                env.insert(n.clone(), Binding::Unknown);
+                .filter(|i| contains(&r, i.range.start_line, i.range.start_column))
+            {
+                env.insert(import_name(i).to_owned(), import_binding(i));
             }
-            pending.push(Work::Finish(node, slot, before));
+            return true;
+        }
+        false
+    }
+    fn visit_catch<'tree>(
+        &mut self,
+        node: Node<'tree>,
+        slot: usize,
+        traversal: &mut BindingTraversal<'tree>,
+    ) -> bool {
+        let pending = &mut traversal.pending;
+        let environments = &mut traversal.environments;
+        let env = environments[slot].as_mut().unwrap();
+        if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript)
+            && node.kind() == "catch_clause"
+        {
+            let mut local = env.clone();
+            if let Some(parameter) = child(node, "parameter") {
+                for n in pattern_names(parameter, self.source) {
+                    local.insert(n, Binding::Unknown);
+                }
+            }
+            let local_slot = environments.len();
+            environments.push(Some(local));
+            pending.push(BindingWork::Discard(local_slot, None));
             pending.extend(
                 named_children(node)
                     .into_iter()
                     .rev()
-                    .map(|c| Work::Visit(c, slot, false)),
+                    .map(|c| BindingWork::Visit(c, local_slot, false)),
             );
+            return true;
         }
-        *env = environments[0].take().unwrap();
+        false
+    }
+    fn visit_exception<'tree>(
+        &mut self,
+        node: Node<'tree>,
+        slot: usize,
+        traversal: &mut BindingTraversal<'tree>,
+    ) -> bool {
+        let pending = &mut traversal.pending;
+        let environments = &mut traversal.environments;
+        let env = environments[slot].as_mut().unwrap();
+        if let Some((n, ty)) = exception(node, self.source, self.dialect) {
+            let ty = if self.dialect == Dialect::Php {
+                match ty {
+                    Binding::Type(raw) => typed_in_scope(
+                        &raw,
+                        self.dialect,
+                        self.owner,
+                        self.imports,
+                        &range(node, Path::new("")),
+                    ),
+                    binding => binding,
+                }
+            } else {
+                ty
+            };
+            let mut local = env.clone();
+            local.insert(n.clone(), ty);
+            let local_slot = environments.len();
+            environments.push(Some(local));
+            pending.push(BindingWork::Discard(
+                local_slot,
+                (self.dialect == Dialect::Python).then_some((slot, n)),
+            ));
+            pending.extend(
+                named_children(node)
+                    .into_iter()
+                    .rev()
+                    .map(|c| BindingWork::Visit(c, local_slot, false)),
+            );
+            return true;
+        }
+        false
+    }
+    fn visit_loop<'tree>(
+        &mut self,
+        node: Node<'tree>,
+        slot: usize,
+        traversal: &mut BindingTraversal<'tree>,
+    ) -> bool {
+        let pending = &mut traversal.pending;
+        let environments = &mut traversal.environments;
+        let env = environments[slot].as_mut().unwrap();
+        if is_loop(node.kind()) {
+            let mut local = env.clone();
+            let mut bound = child(node, "left")
+                .or_else(|| child(node, "pattern"))
+                .map(|n| pattern_names(n, self.source))
+                .unwrap_or_default();
+            if node.kind() == "foreach_statement" {
+                for n in named_children(node)
+                    .into_iter()
+                    .filter(|n| child(node, "body").is_none_or(|b| b.id() != n.id()))
+                    .skip(1)
+                {
+                    bound.extend(pattern_names(n, self.source));
+                }
+            }
+            let lexical_initializer =
+                child(node, "initializer").filter(|n| n.kind() == "lexical_declaration");
+            if let Some(initializer) = lexical_initializer {
+                let mut children_cursor = initializer.walk();
+                for d in initializer.named_children(&mut children_cursor) {
+                    if let Some(pattern) = child(d, "name") {
+                        bound.extend(pattern_names(pattern, self.source));
+                    }
+                }
+            }
+            let scoped = self.dialect == Dialect::Rust
+                || (matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript)
+                    && (lexical_initializer.is_some()
+                        || child(node, "kind")
+                            .is_some_and(|n| ["let", "const"].contains(&snippet(n, self.source)))));
+            for n in &bound {
+                local.insert(n.clone(), Binding::Unknown);
+            }
+            let local_slot = environments.len();
+            environments.push(Some(local));
+            pending.push(BindingWork::Loop(slot, local_slot, bound, scoped));
+            let body = child(node, "body");
+            if let Some(body) = body {
+                pending.push(BindingWork::Visit(body, local_slot, false));
+            }
+            pending.extend(
+                named_children(node)
+                    .into_iter()
+                    .filter(|c| body.is_none_or(|b| b.id() != c.id()))
+                    .rev()
+                    .map(|c| BindingWork::Visit(c, local_slot, false)),
+            );
+            return true;
+        }
+        false
+    }
+    fn visit_branch<'tree>(
+        &mut self,
+        node: Node<'tree>,
+        slot: usize,
+        traversal: &mut BindingTraversal<'tree>,
+    ) -> bool {
+        let pending = &mut traversal.pending;
+        if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript)
+            && matches!(node.kind(), "if_statement" | "ternary_expression")
+        {
+            pending.push(BindingWork::Branches(node, slot));
+            if let Some(condition) = child(node, "condition") {
+                pending.push(BindingWork::Visit(condition, slot, false));
+            }
+            return true;
+        }
+        false
+    }
+    fn visit_logical<'tree>(
+        &mut self,
+        node: Node<'tree>,
+        slot: usize,
+        traversal: &mut BindingTraversal<'tree>,
+    ) -> bool {
+        let pending = &mut traversal.pending;
+        if matches!(self.dialect, Dialect::JavaScript | Dialect::TypeScript)
+            && matches!(
+                node.kind(),
+                "augmented_assignment_expression" | "binary_expression"
+            )
+            && child(node, "operator").is_some_and(|operator| {
+                matches!(
+                    snippet(operator, self.source),
+                    "&&=" | "||=" | "??=" | "&&" | "||" | "??"
+                )
+            })
+        {
+            pending.push(BindingWork::LogicalRight(node, slot));
+            if let Some(left) = child(node, "left") {
+                pending.push(BindingWork::Visit(left, slot, false));
+            }
+            return true;
+        }
+        false
+    }
+    fn visit_control<'tree>(
+        &mut self,
+        node: Node<'tree>,
+        slot: usize,
+        traversal: &mut BindingTraversal<'tree>,
+    ) -> bool {
+        let pending = &mut traversal.pending;
+        let environments = &mut traversal.environments;
+        let control = [
+            "if_statement",
+            "try_statement",
+            "match_statement",
+            "match_expression",
+            "switch_statement",
+            "conditional_expression",
+            "ternary_expression",
+        ]
+        .contains(&node.kind())
+            || (node.kind() == "augmented_assignment_expression"
+                && child(node, "operator").is_some_and(|operator| {
+                    matches!(snippet(operator, self.source), "&&=" | "||=" | "??=")
+                }));
+        if control {
+            let mut visits = Vec::new();
+            let mut locals = Vec::new();
+            for c in named_children(node) {
+                let local = environments.len();
+                environments.push(environments[slot].clone());
+                locals.push(local);
+                visits.push(BindingWork::Visit(c, local, false));
+            }
+            pending.push(BindingWork::Control(slot, locals));
+            pending.extend(visits.into_iter().rev());
+            return true;
+        }
+        false
+    }
+    fn visit_children<'tree>(
+        &mut self,
+        node: Node<'tree>,
+        slot: usize,
+        root: bool,
+        traversal: &mut BindingTraversal<'tree>,
+    ) {
+        let pending = &mut traversal.pending;
+        let environments = &mut traversal.environments;
+        let env = environments[slot].as_mut().unwrap();
+        let block = !root
+            && matches!(
+                self.dialect,
+                Dialect::JavaScript | Dialect::TypeScript | Dialect::Rust
+            )
+            && ["block", "statement_block"].contains(&node.kind());
+        let mut declared = Vec::new();
+        if block {
+            let mut children_cursor = node.walk();
+            for c in node.named_children(&mut children_cursor) {
+                if c.kind() == "let_declaration" {
+                    if let Some(n) = child(c, "pattern").and_then(|n| name(n, self.source)) {
+                        declared.push(n);
+                    }
+                }
+                if c.kind() == "lexical_declaration" {
+                    let mut children_cursor = c.walk();
+                    for d in c.named_children(&mut children_cursor) {
+                        if let Some(n) = child(d, "name").and_then(|n| name(n, self.source)) {
+                            declared.push(n);
+                        }
+                    }
+                }
+            }
+        }
+        // Only declarations in this block need restoration. Other assignments escape.
+        let before: Vec<_> = declared
+            .iter()
+            .map(|name| (name.clone(), env.get(name).cloned()))
+            .collect();
+        for n in &declared {
+            env.insert(n.clone(), Binding::Unknown);
+        }
+        pending.push(BindingWork::Finish(node, slot, before));
+        pending.extend(
+            named_children(node)
+                .into_iter()
+                .rev()
+                .map(|c| BindingWork::Visit(c, slot, false)),
+        );
+    }
+    fn visit_binding_node<'tree>(
+        &mut self,
+        node: Node<'tree>,
+        slot: usize,
+        root: bool,
+        traversal: &mut BindingTraversal<'tree>,
+    ) {
+        if self.visit_declaration(node, slot, traversal) {
+            return;
+        }
+        self.bind_call(node, traversal.environments[slot].as_ref().unwrap());
+        if self.visit_import(node, slot, traversal) {
+            return;
+        }
+        if self.visit_catch(node, slot, traversal) {
+            return;
+        }
+        if self.visit_exception(node, slot, traversal) {
+            return;
+        }
+        if self.visit_loop(node, slot, traversal) {
+            return;
+        }
+        if self.visit_branch(node, slot, traversal) {
+            return;
+        }
+        if self.visit_logical(node, slot, traversal) {
+            return;
+        }
+        if self.visit_control(node, slot, traversal) {
+            return;
+        }
+        self.visit_children(node, slot, root, traversal);
     }
     fn bind_call(&mut self, node: Node<'_>, env: &BTreeMap<String, Binding>) {
         let start = node.start_position();

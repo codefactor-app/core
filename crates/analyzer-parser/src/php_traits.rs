@@ -1,6 +1,6 @@
 //! Normalize trait composition from syntax nodes; namespace imports use a
 //! different grammar node and never enter this path.
-use crate::{named_children, range, snippet};
+use crate::support::{named_children, range, snippet};
 use analyzer_core::{TraitAdaptation, TraitUse};
 use std::path::Path;
 use tree_sitter::Node;

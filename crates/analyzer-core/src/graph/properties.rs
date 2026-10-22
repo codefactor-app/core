@@ -32,7 +32,7 @@ impl PropertyIndex {
         files: &[FileModel],
         modules: &ModuleIndex<'_>,
         exports: &BTreeMap<&str, BTreeMap<String, String>>,
-        types: &BTreeSet<(&str, &str)>,
+        types: &KnownTypes,
     ) -> Self {
         let mut index = Self::default();
         let symbol_constants = files
@@ -329,7 +329,7 @@ impl PropertyIndex {
         locals: &BTreeMap<String, String>,
         modules: &ModuleIndex<'_>,
         exports: &BTreeMap<&str, BTreeMap<String, String>>,
-        types: &BTreeSet<(&str, &str)>,
+        types: &KnownTypes,
     ) -> Vec<String> {
         let site = &access.site;
         let (descriptors, blocked) = self.for_site(
@@ -359,7 +359,7 @@ impl PropertyIndex {
         locals: &BTreeMap<String, String>,
         modules: &ModuleIndex<'_>,
         exports: &BTreeMap<&str, BTreeMap<String, String>>,
-        types: &BTreeSet<(&str, &str)>,
+        types: &KnownTypes,
     ) -> Option<Vec<String>> {
         let (descriptors, blocked) = self.for_site(
             file, function, site, context, locals, modules, exports, types,
@@ -394,7 +394,7 @@ impl PropertyIndex {
         locals: &BTreeMap<String, String>,
         modules: &ModuleIndex<'_>,
         exports: &BTreeMap<&str, BTreeMap<String, String>>,
-        types: &BTreeSet<(&str, &str)>,
+        types: &KnownTypes,
     ) -> bool {
         if site.receiver.is_none() {
             return false;
@@ -420,7 +420,7 @@ impl PropertyIndex {
         locals: &BTreeMap<String, String>,
         modules: &ModuleIndex<'_>,
         exports: &BTreeMap<&str, BTreeMap<String, String>>,
-        types: &BTreeSet<(&str, &str)>,
+        types: &KnownTypes,
     ) -> bool {
         if site.receiver.is_none() {
             return false;
@@ -448,7 +448,7 @@ impl PropertyIndex {
         locals: &BTreeMap<String, String>,
         modules: &ModuleIndex<'_>,
         exports: &BTreeMap<&str, BTreeMap<String, String>>,
-        types: &BTreeSet<(&str, &str)>,
+        types: &KnownTypes,
     ) -> bool {
         self.owner_for_site(
             file, function, site, context, locals, modules, exports, types,
@@ -466,7 +466,7 @@ impl PropertyIndex {
         locals: &BTreeMap<String, String>,
         modules: &ModuleIndex<'_>,
         exports: &BTreeMap<&str, BTreeMap<String, String>>,
-        types: &BTreeSet<(&str, &str)>,
+        types: &KnownTypes,
     ) -> (Vec<Descriptor>, bool) {
         let alternatives = if site.receiver_types.is_empty() {
             vec![site.clone()]
@@ -760,7 +760,7 @@ impl PropertyIndex {
         locals: &BTreeMap<String, String>,
         modules: &ModuleIndex<'_>,
         exports: &BTreeMap<&str, BTreeMap<String, String>>,
-        types: &BTreeSet<(&str, &str)>,
+        types: &KnownTypes,
     ) -> Option<String> {
         self.owner_for_site(
             file, function, site, context, locals, modules, exports, types,
@@ -778,7 +778,7 @@ impl PropertyIndex {
         locals: &BTreeMap<String, String>,
         modules: &ModuleIndex<'_>,
         exports: &BTreeMap<&str, BTreeMap<String, String>>,
-        types: &BTreeSet<(&str, &str)>,
+        types: &KnownTypes,
     ) -> Option<(String, bool)> {
         if site.binding_unknown {
             return None;

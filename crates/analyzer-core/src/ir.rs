@@ -2,22 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SourceRange {
-    pub file: Arc<str>,
-    pub start_line: usize,
-    pub start_column: usize,
-    pub end_line: usize,
-    pub end_column: usize,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Loc {
-    pub total: usize,
-    pub code: usize,
-    pub comment: usize,
-    pub blank: usize,
-}
+pub use crate::source::{Loc, SourceRange};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -118,7 +103,7 @@ pub struct FileModel {
     #[serde(default)]
     pub source_hash: String,
     #[serde(default, skip_serializing)]
-    pub architecture_facts: Option<Arc<crate::architecture::FileFacts>>,
+    pub architecture_facts: Option<Arc<crate::architecture::model::FileFacts>>,
 }
 
 /// A proven classic-script callable, or a write that invalidates its global name.
@@ -198,6 +183,8 @@ pub struct TypeModel {
     pub name: String,
     pub fqn: String,
     pub kind: TypeKind,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_abstract: bool,
     pub range: SourceRange,
     #[serde(default)]
     pub fields: Vec<Field>,
@@ -335,12 +322,61 @@ pub struct FunctionModel {
     pub accessor: Option<AccessorKind>,
     /// Compact language-neutral cost IR, retained in the file cache, not a detailed AST.
     #[serde(default, skip_serializing)]
-    pub cost_ir: Option<Arc<crate::algorithmic::CostNode>>,
+    pub cost_ir: Option<Arc<crate::algorithmic::model::CostNode>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub algorithmic_complexity: Option<Arc<crate::algorithmic::ComplexityEstimate>>,
+    pub algorithmic_complexity: Option<Arc<crate::algorithmic::model::ComplexityEstimate>>,
+}
+
+/// Constructor spelling for each built-in language. Rust uses the conventional
+/// associated `new` function rather than a dedicated constructor syntax.
+pub fn constructor_name_for(language: &str) -> Option<&'static str> {
+    match language {
+        "php" => Some("__construct"),
+        "python" => Some("__init__"),
+        "javascript" | "typescript" => Some("constructor"),
+        "rust" => Some("new"),
+        _ => None,
+    }
 }
 
 impl FunctionModel {
+    pub fn is_static_method(&self) -> bool {
+        self.modifiers.iter().any(|modifier| {
+            matches!(
+                modifier.as_str(),
+                "static"
+                    | "@staticmethod"
+                    | "@builtins.staticmethod"
+                    | "@classmethod"
+                    | "@builtins.classmethod"
+            )
+        })
+    }
+
+    pub fn is_abstract_method(&self) -> bool {
+        self.modifiers
+            .iter()
+            .any(|modifier| modifier.contains("abstract"))
+    }
+
+    pub fn is_constructor(&self, language: &str) -> bool {
+        if self.parent_type.is_none() || self.parent_function.is_some() {
+            return false;
+        }
+        if matches!(language, "javascript" | "typescript")
+            && self.modifiers.iter().any(|modifier| modifier == "static")
+        {
+            return false;
+        }
+        constructor_name_for(language).is_some_and(|name| {
+            if language == "php" {
+                self.name.eq_ignore_ascii_case(name)
+            } else {
+                self.name == name
+            }
+        })
+    }
+
     /// Runtime code at module scope is a graph entry, not a source function declaration.
     pub fn is_module_initializer(&self) -> bool {
         self.modifiers

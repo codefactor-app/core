@@ -121,6 +121,7 @@ pub async fn run(
         .route("/", get(index))
         .route("/assets/app.css", get(css))
         .route("/assets/app.js", get(js))
+        .route("/assets/ui-utils.js", get(ui_utils))
         .route("/assets/graph-model.js", get(graph_model))
         .route("/assets/tree-model.js", get(tree_model))
         .route("/assets/relations-model.js", get(relations_model))
@@ -423,6 +424,12 @@ async fn codemap_js() -> Response {
 async fn js() -> Response {
     asset(
         include_str!("../web/app.js"),
+        "text/javascript; charset=utf-8",
+    )
+}
+async fn ui_utils() -> Response {
+    asset(
+        include_str!("../web/ui-utils.js"),
         "text/javascript; charset=utf-8",
     )
 }
@@ -1822,7 +1829,7 @@ mod ast_tests {
         let mut config = analyzer_core::Config::default();
         config.cache.enabled = false;
         config.resolution.rust.features = Some(vec![]);
-        let analyzer = Analyzer::new(crate::registry(), config);
+        let analyzer = Analyzer::new(crate::registry::registry(), config);
         let before = source_snapshot(&root, &analyzer, false);
         assert!(before.contains_key(&root.join("Cargo.toml")));
         assert_eq!(
@@ -1882,7 +1889,7 @@ mod ast_tests {
         std::fs::write(root.join("shared.rs"), "pub fn run(){crate::helper();}\n").unwrap();
         let mut config = analyzer_core::Config::default();
         config.cache.enabled = false;
-        let analyzer = Arc::new(Analyzer::new(crate::registry(), config));
+        let analyzer = Arc::new(Analyzer::new(crate::registry::registry(), config));
         let mut report = analyzer.scan(&root).unwrap();
         assert!(!report
             .files
@@ -1970,7 +1977,7 @@ mod ast_tests {
         );
         let mut config = analyzer_core::Config::default();
         config.cache.enabled = false;
-        let analyzer = Arc::new(Analyzer::new(crate::registry(), config));
+        let analyzer = Arc::new(Analyzer::new(crate::registry::registry(), config));
         let mut report = analyzer.scan(&source).unwrap();
         assert_eq!(report.architecture.warnings, 1);
         let info = super::super::function_info::prepare(&mut report);
@@ -2029,7 +2036,7 @@ mod ast_tests {
         }
         let mut config = analyzer_core::Config::default();
         config.cache.enabled = false;
-        let analyzer = Arc::new(Analyzer::new(crate::registry(), config));
+        let analyzer = Arc::new(Analyzer::new(crate::registry::registry(), config));
         let mut report = analyzer.scan(&root).unwrap();
         let info = super::super::function_info::prepare(&mut report);
         let state = Arc::new(AppState {
@@ -2168,7 +2175,7 @@ mod ast_tests {
         std::fs::write(root.join("other.py"), "def unrelated():\n    missing()\n").unwrap();
         let mut config = analyzer_core::Config::default();
         config.cache.enabled = false;
-        let analyzer = Arc::new(Analyzer::new(crate::registry(), config));
+        let analyzer = Arc::new(Analyzer::new(crate::registry::registry(), config));
         let report = analyzer.scan(&root).unwrap();
         let model = report.file("source.py").unwrap();
         let expected = model.functions.iter().flat_map(|f| &f.calls).map(|call| {
@@ -2217,7 +2224,7 @@ mod ast_tests {
         std::fs::write(root.join("nested.ts"), source).unwrap();
         let mut config = analyzer_core::Config::default();
         config.cache.enabled = false;
-        let analyzer = Arc::new(Analyzer::new(crate::registry(), config));
+        let analyzer = Arc::new(Analyzer::new(crate::registry::registry(), config));
         let report = analyzer.scan(&root).unwrap();
         assert!(report.files[0]
             .functions
